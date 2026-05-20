@@ -13,6 +13,8 @@ const {
   rateLimitMessage,
 } = require("./watermark");
 
+const { sendLesson } = require('./lessonSender');
+
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -29,6 +31,17 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY,
 );
+
+// Initialize lessonSender with dependencies
+const { init: initLessonSender } = require('./lessonSender');
+initLessonSender({
+  supabase,
+  sendMessage: async (chatId, text, keyboard) => sendMessage(chatId, text, keyboard),
+  config: {
+    LESSON_LINK_SECRET,
+    ACADEMYKIT_URL,
+  },
+});
 
 Object.entries({
   TELEGRAM_BOT_TOKEN: BOT_TOKEN,
@@ -232,91 +245,7 @@ async function handleStart(chatId, token) {
   );
 }
 
-async function sendLesson(chatId) {
-  // --- ADD: rate limit check ---
-  const { limited, retryAfterSeconds } = checkRateLimit(chatId);
-  if (limited) {
-    await sendMessage(chatId, rateLimitMessage(retryAfterSeconds));
-    return;
-  }
 
-  const enrollment = await getEnrollment(chatId);
-  console.log(
-    "[debug] enrollment:",
-    JSON.stringify({
-      id: enrollment?.id,
-      course_uuid: enrollment?.course_uuid,
-      course_id: enrollment?.courses?.id,
-      current_lesson: enrollment?.current_lesson,
-      payment_status: enrollment?.payment_status,
-    }),
-  );
-  if (!enrollment || !enrollment.courses) {
-    await sendMessage(
-      chatId,
-      "No course connected yet. Open your course page and tap *Start on Telegram* first.",
-    );
-    return;
-  }
-
-  const course = enrollment.courses;
-  const lessonNumber = enrollment.current_lesson || 1;
-
-  if (!lessonAllowed(enrollment, lessonNumber)) {
-    await sendMessage(
-      chatId,
-      `Your free preview is complete.\n\nUnlock the full course here:\n${courseUrl(course)}`,
-    );
-    return;
-  }
-
-  const lesson = await firstRow(
-    supabase
-      .from("lessons")
-      .select("*, course_modules:module_id(name)")
-      .eq("course_id", course.id)
-      .eq("order_num", lessonNumber)
-      .eq("is_published", true),
-  );
-
-  if (!lesson) {
-    await sendMessage(
-      chatId,
-      `No published lesson found for lesson ${lessonNumber}.`,
-    );
-    return;
-  }
-
-  // --- ADD: log access for piracy detection ---
-  await logLessonAccess(chatId, lesson.id, course.id);
-
-  // Signed stream URL — same proxy as website
-  const streamUrl = signedLessonUrl(course, lesson, chatId);
-
-  // --- CHANGE: use watermarked message builder ---
-  const messageText = buildLessonMessage({
-    lesson: { ...lesson, module_name: lesson.course_modules?.name },
-    course,
-    enrollment: {
-      ...enrollment,
-      student_name: enrollment.phone || String(chatId),
-    },
-    streamUrl,
-    chatId,
-  });
-
-  await sendMessage(chatId, messageText, {
-    inline_keyboard: [
-      [{ text: "✅ Mark done", callback_data: `done:${lesson.order_num}` }],
-      [{ text: "📊 Progress", callback_data: "progress" }],
-    ],
-  });
-
-  await supabase
-    .from("enrollments")
-    .update({ last_accessed: new Date().toISOString() })
-    .eq("id", enrollment.id);
-}
 
 async function markDone(chatId, lessonNumber) {
   const enrollment = await getEnrollment(chatId);
