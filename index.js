@@ -2,6 +2,8 @@ if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
 }
 
+// Telegram bot for AcademyKit courses
+
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
