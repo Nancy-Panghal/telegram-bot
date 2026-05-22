@@ -17,6 +17,7 @@
 
 const crypto = require('crypto')
 const axios  = require('axios')
+const { checkRateLimit, encodeFingerprint, logLessonAccess } = require('./watermark')
 
 let _supabase, _sendMessage, _config
 
@@ -49,46 +50,12 @@ function signLessonPageUrl(courseId, lessonId, lessonNum, identity) {
   return `${_config.ACADEMYKIT_URL}/api/lesson/view?${params.toString()}`
 }
 
-// ── Rate limiter ──────────────────────────────────────────────────
-const rateLimitStore = new Map()
-const RATE_WINDOW_MS = 10 * 60 * 1000
-const RATE_MAX       = 5
-
-function checkRateLimit(chatId) {
-  const key = String(chatId)
-  const now = Date.now()
-  const entry = rateLimitStore.get(key) || { count: 0, windowStart: now }
-  if (now - entry.windowStart > RATE_WINDOW_MS) {
-    rateLimitStore.set(key, { count: 1, windowStart: now })
-    return { limited: false }
-  }
-  entry.count++
-  rateLimitStore.set(key, entry)
-  if (entry.count > RATE_MAX) {
-    const retryAfterSec = Math.ceil((RATE_WINDOW_MS - (now - entry.windowStart)) / 1000)
-    return { limited: true, retryAfterSec }
-  }
-  return { limited: false }
-}
-
-// ── Zero-width fingerprint ─────────────────────────────────────────
-const ZWS  = '\u200B'
-const ZWNJ = '\u200C'
-function fingerprint(text, maxChars = 12) {
-  let r = ''
-  for (let i = 0; i < Math.min(text.length, maxChars); i++) {
-    const code = text.charCodeAt(i)
-    for (let bit = 7; bit >= 0; bit--) r += (code >> bit) & 1 ? ZWNJ : ZWS
-  }
-  return r
-}
-
 // ── Main sendLesson ────────────────────────────────────────────────
 async function sendLesson(chatId) {
   // 1. Rate limit
-  const { limited, retryAfterSec } = checkRateLimit(chatId)
+  const { limited, retryAfterSeconds } = checkRateLimit(chatId)
   if (limited) {
-    const mins = Math.ceil(retryAfterSec / 60)
+    const mins = Math.ceil(retryAfterSeconds / 60)
     await _sendMessage(
       chatId,
       `⏳ *Slow down\\!*\n\nYou're requesting lessons too quickly\\. Please wait *${mins} minute${mins > 1 ? 's' : ''}* before requesting the next lesson\\.`
@@ -143,7 +110,7 @@ async function sendLesson(chatId) {
   const lessonUrl = signLessonPageUrl(course.id, lesson.id, lesson.order_num, String(chatId))
 
   // 6. Build watermarked message with invisible fingerprint
-  const fp = fingerprint(String(chatId))
+  const fp = encodeFingerprint(String(chatId))
   const durationLine = lesson.duration ? `⏱ ${lesson.duration}\n` : ''
 
   const text = [
@@ -175,10 +142,7 @@ async function sendLesson(chatId) {
     .then(() => {}).catch(() => {})
 
   // 9. Log access for piracy detection (non-blocking)
-  _supabase
-    .from('lesson_access_logs')
-    .insert({ chat_id: String(chatId), lesson_id: lesson.id, course_id: course.id, accessed_at: new Date().toISOString() })
-    .then(() => {}).catch(() => {})
+  logLessonAccess(String(chatId), lesson.id, course.id).catch(() => {})
 }
 
 // ── Helpers ────────────────────────────────────────────────────────

@@ -5,20 +5,29 @@
  * Since Telegram renders HTML pages via the signed lesson URL,
  * the main watermark is on the lesson viewer page (WatermarkedPlayer).
  *
- * This file adds:
- *  1. Watermarked text messages — every lesson message includes identity
- *  2. Rate limiting per chat_id — prevents bulk lesson scraping
- *  3. Anti-sharing notice appended to every message
- *  4. Enrollment fingerprint — detect if same course is accessed from 2+ Telegram accounts
+ * This file provides shared utilities:
+ *  1. Rate limiting per chat_id — prevents bulk lesson scraping
+ *  2. Zero-width fingerprinting — detects content sharing
+ *  3. Access logging — tracks piracy signals
  *
  * Usage in index.js:
- *   const { buildLessonMessage, checkRateLimit, logLessonAccess } = require('./watermark')
+ *   const { initWatermark } = require('./watermark')
+ *   initWatermark(supabase)
  */
 
 const crypto = require('crypto')
 const { createClient } = require('@supabase/supabase-js')
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
+// Default supabase instance — will be overridden by init()
+let _supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
+
+/**
+ * Initialize watermark module with the shared Supabase instance.
+ * Call this once from index.js after creating supabase.
+ */
+function initWatermark(supabase) {
+  _supabase = supabase
+}
 
 // ── Rate limit store (in-memory; swap for Redis in production) ───────────────
 const rateLimitStore = new Map()
@@ -155,7 +164,7 @@ function decodeFingerprint(encoded) {
 async function logLessonAccess(chatId, lessonId, courseId) {
   try {
     // Insert access log
-    await supabase.from('lesson_access_logs').insert({
+    await _supabase.from('lesson_access_logs').insert({
       chat_id: String(chatId),
       lesson_id: lessonId,
       course_id: courseId,
@@ -164,7 +173,7 @@ async function logLessonAccess(chatId, lessonId, courseId) {
 
     // Check for suspicious multi-account access (same course, 3+ different chat_ids in 24h)
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    const { data: recentAccess } = await supabase
+    const { data: recentAccess } = await _supabase
       .from('lesson_access_logs')
       .select('chat_id')
       .eq('course_id', courseId)
@@ -200,6 +209,7 @@ function rateLimitMessage(retryAfterSeconds) {
 }
 
 module.exports = {
+  initWatermark,
   checkRateLimit,
   buildLessonMessage,
   logLessonAccess,

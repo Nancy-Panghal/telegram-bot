@@ -8,14 +8,9 @@ const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
-const {
-  checkRateLimit,
-  buildLessonMessage,
-  logLessonAccess,
-  rateLimitMessage,
-} = require("./watermark");
 
 const { sendLesson } = require('./lessonSender');
+const { initWatermark } = require('./watermark');
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -34,7 +29,8 @@ const supabase = createClient(
   process.env.SUPABASE_KEY,
 );
 
-// Initialize lessonSender with dependencies
+// Initialize shared watermark and lessonSender modules with supabase
+initWatermark(supabase);
 const { init: initLessonSender } = require('./lessonSender');
 initLessonSender({
   supabase,
@@ -83,24 +79,6 @@ async function firstRow(query) {
 
 function courseUrl(course) {
   return `${ACADEMYKIT_URL}/course/${slugify(course.host_name || "creator")}/${slugify(course.name || course.slug || "course")}/${course.id}`;
-}
-
-function signedLessonUrl(course, lesson, chatId) {
-  const exp = Date.now() + 60 * 60 * 1000;
-  const payload = `${course.id}.${lesson.id}.${lesson.order_num}.${chatId}.${exp}`;
-  const sig = crypto
-    .createHmac("sha256", LESSON_LINK_SECRET)
-    .update(payload)
-    .digest("hex");
-  const params = new URLSearchParams({
-    courseId: course.id,
-    lessonId: lesson.id,
-    lesson: String(lesson.order_num),
-    chatId: String(chatId),
-    exp: String(exp),
-    sig,
-  });
-  return `${ACADEMYKIT_URL}/api/telegram/lesson?${params.toString()}`;
 }
 
 function lessonAllowed(enrollment, lessonNumber) {
