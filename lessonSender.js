@@ -88,7 +88,7 @@ async function sendLesson(chatId) {
       chatId,
       `🔒 *Free preview complete\\.*\n\nUnlock the full course to continue learning\\.`,
       {
-        inline_keyboard: [[{ text: 'Pay and unlock course', web_app: { url: courseUrl } }]],
+        inline_keyboard: [[{ text: 'Pay and unlock course', url: courseUrl }]],
       }
     )
     return
@@ -117,6 +117,9 @@ async function sendLesson(chatId) {
       ? new Date(course.course_end_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
       : null
     const total = course.total_lessons || publishedCount || 0
+    const infoMessage = course.student_update_message
+      ? escMd(String(course.student_update_message).slice(0, 500))
+      : null
 
     await _sendMessage(
       chatId,
@@ -125,6 +128,7 @@ async function sendLesson(chatId) {
         `Progress: ${Math.min(lessonNum - 1, publishedCount || 0)}/${total} lessons watched\\.`,
         nextDate ? `Next lesson is planned for *${escMd(nextDate)}*\\.` : `The creator has not announced the next lesson date yet\\.`,
         endDate ? `Course planned end date: *${escMd(endDate)}*\\.` : '',
+        infoMessage ? `\nCreator note: ${infoMessage}` : '',
       ].filter(Boolean).join('\n')
     )
     return
@@ -151,7 +155,7 @@ async function sendLesson(chatId) {
   // 7. Send message — fire-and-forget logging
   await _sendMessage(chatId, text, {
     inline_keyboard: [
-      [{ text: '▶ Open Lesson', web_app: { url: lessonUrl } }],
+      [{ text: '▶ Open Lesson', url: lessonUrl }],
       [
         { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
         { text: '📊 Progress',  callback_data: 'progress' },
