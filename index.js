@@ -95,12 +95,42 @@ async function sendMessage(chatId, text, keyboard) {
     text,
     parse_mode: "Markdown",
     protect_content: true,
-    disable_web_page_preview: false,
+    disable_web_page_preview: true,
   };
 
   if (keyboard) body.reply_markup = keyboard;
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, body, { timeout: 10000 });
+  try {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, body, { timeout: 10000 });
+  } catch (err) {
+    const fallbackKeyboard = webAppKeyboardToUrl(keyboard);
+    const description = err.response?.data?.description || "";
+    if (!fallbackKeyboard || !description.includes("BUTTON_TYPE_INVALID")) {
+      throw err;
+    }
+
+    await axios.post(
+      `${TELEGRAM_API}/sendMessage`,
+      { ...body, reply_markup: fallbackKeyboard },
+      { timeout: 10000 },
+    );
+  }
+}
+
+function webAppKeyboardToUrl(keyboard) {
+  if (!keyboard?.inline_keyboard) return null;
+
+  let changed = false;
+  const inline_keyboard = keyboard.inline_keyboard.map((row) =>
+    row.map((button) => {
+      if (!button.web_app?.url) return button;
+      changed = true;
+      const { web_app, ...rest } = button;
+      return { ...rest, url: web_app.url };
+    }),
+  );
+
+  return changed ? { ...keyboard, inline_keyboard } : null;
 }
 
 async function answerCallback(callbackQueryId) {

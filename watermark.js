@@ -71,7 +71,7 @@ function checkRateLimit(chatId) {
  * @param {object} params.lesson        - lesson row from DB
  * @param {object} params.course        - course row from DB
  * @param {object} params.enrollment    - enrollment row from DB
- * @param {string} params.streamUrl     - signed lesson viewer URL
+ * @param {string} params.streamUrl     - signed lesson viewer URL used by the inline button
  * @param {string|number} params.chatId - Telegram chat ID
  * @returns {string} formatted message text (Markdown)
  */
@@ -89,8 +89,7 @@ function buildLessonMessage({ lesson, course, enrollment, streamUrl, chatId }) {
     `📖 Lesson ${lesson.order_num}: *${lesson.title}*`,
     durationLine,
     ``,
-    `🔗 Your protected lesson link \\(expires in 1 hour\\):`,
-    streamUrl,
+    `Tap *Open Lesson* below\\. Your protected access expires in 1 hour\\.`,
     ``,
     `─────────────────────`,
     `🔒 Licensed to: *${studentName}*`,

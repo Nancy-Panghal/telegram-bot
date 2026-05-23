@@ -86,25 +86,51 @@ async function sendLesson(chatId) {
     const courseUrl = `${_config.ACADEMYKIT_URL}/about-course/${slugify(course.host_name || 'creator')}/${slugify(course.name || 'course')}/${course.id}`
     await _sendMessage(
       chatId,
-      `🔒 *Free preview complete\\.*\n\nUnlock all lessons here:\n${courseUrl}`
+      `🔒 *Free preview complete\\.*\n\nUnlock the full course to continue learning\\.`,
+      {
+        inline_keyboard: [[{ text: 'Pay and unlock course', web_app: { url: courseUrl } }]],
+      }
     )
     return
   }
 
   // 4. Fetch lesson (no module join — avoids FK error)
-  const { data: lesson, error: lessonErr } = await _supabase
+  const { data: lessons, error: lessonErr } = await _supabase
     .from('lessons')
     .select('*')
     .eq('course_id', course.id)
     .eq('order_num', lessonNum)
     .eq('is_published', true)
     .limit(1)
-    .single()
 
-  if (lessonErr || !lesson) {
-    await _sendMessage(chatId, `No published lesson found for lesson ${lessonNum}\\.`)
+  if (lessonErr || !lessons?.length) {
+    const { count: publishedCount } = await _supabase
+      .from('lessons')
+      .select('id', { count: 'exact', head: true })
+      .eq('course_id', course.id)
+      .eq('is_published', true)
+
+    const nextDate = course.next_lesson_date
+      ? new Date(course.next_lesson_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+      : null
+    const endDate = course.course_end_date
+      ? new Date(course.course_end_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+      : null
+    const total = course.total_lessons || publishedCount || 0
+
+    await _sendMessage(
+      chatId,
+      [
+        `You are caught up\\. Lesson ${lessonNum} is not published yet\\.`,
+        `Progress: ${Math.min(lessonNum - 1, publishedCount || 0)}/${total} lessons watched\\.`,
+        nextDate ? `Next lesson is planned for *${escMd(nextDate)}*\\.` : `The creator has not announced the next lesson date yet\\.`,
+        endDate ? `Course planned end date: *${escMd(endDate)}*\\.` : '',
+      ].filter(Boolean).join('\n')
+    )
     return
   }
+
+  const lesson = lessons[0]
 
   // 5. Generate signed lesson page URL (opens on your website with watermark)
   const lessonUrl = signLessonPageUrl(course.id, lesson.id, lesson.order_num, String(chatId))
@@ -116,8 +142,7 @@ async function sendLesson(chatId) {
   const text = [
     `📖 *Lesson ${lesson.order_num}: ${escMd(lesson.title)}*`,
     durationLine,
-    `🔗 Your protected lesson link \\(expires in 2 hours\\):`,
-    lessonUrl,
+    `Tap *Open Lesson* below\\. Your protected access expires in 2 hours\\.`,
     ``,
     `🔒 _This link is personal\\. Sharing it violates your license agreement\\._`,
     fp,
@@ -126,7 +151,7 @@ async function sendLesson(chatId) {
   // 7. Send message — fire-and-forget logging
   await _sendMessage(chatId, text, {
     inline_keyboard: [
-      [{ text: '▶ Open Lesson', url: lessonUrl }],
+      [{ text: '▶ Open Lesson', web_app: { url: lessonUrl } }],
       [
         { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
         { text: '📊 Progress',  callback_data: 'progress' },
