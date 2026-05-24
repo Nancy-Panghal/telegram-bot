@@ -89,6 +89,22 @@ function lessonAllowed(enrollment, lessonNumber) {
   );
 }
 
+function signResourceUrl(lessonId, type, identity) {
+  const exp = Date.now() + 2 * 60 * 60 * 1000;
+  const payload = `resource.${lessonId}.${type}.${identity}.${exp}`;
+  const sig = crypto
+    .createHmac("sha256", LESSON_LINK_SECRET)
+    .update(payload)
+    .digest("hex");
+  const params = new URLSearchParams({
+    type,
+    identity: String(identity),
+    exp: String(exp),
+    sig,
+  });
+  return `${ACADEMYKIT_URL}/resource/${lessonId}?${params.toString()}`;
+}
+
 async function sendMessage(chatId, text, keyboard) {
   const body = {
     chat_id: chatId,
@@ -278,11 +294,30 @@ async function markDone(chatId, lessonNumber) {
     })
     .eq("id", enrollment.id);
 
-  await sendMessage(chatId, "Lesson marked complete. Ready for the next one?", {
-    inline_keyboard: [
-      [{ text: "Next lesson", callback_data: "lesson" }],
-      [{ text: "Progress", callback_data: "progress" }],
-    ],
+  const lesson = await firstRow(
+    supabase
+      .from("lessons")
+      .select("id, summary_url, notes_url, quiz_questions")
+      .eq("course_id", enrollment.course_uuid)
+      .eq("order_num", lessonNumber)
+      .eq("is_published", true),
+  );
+
+  const keyboard = [];
+  if (lesson?.summary_url) {
+    keyboard.push([{ text: "Summary", url: signResourceUrl(lesson.id, "summary", chatId) }]);
+  }
+  if (lesson?.notes_url) {
+    keyboard.push([{ text: "Notes", url: signResourceUrl(lesson.id, "notes", chatId) }]);
+  }
+  if (Array.isArray(lesson?.quiz_questions) && lesson.quiz_questions.length > 0) {
+    keyboard.push([{ text: "Quiz", url: signResourceUrl(lesson.id, "quiz", chatId) }]);
+  }
+  keyboard.push([{ text: "Next lesson", callback_data: "lesson" }]);
+  keyboard.push([{ text: "Progress", callback_data: "progress" }]);
+
+  await sendMessage(chatId, "Lesson marked complete. Choose what to do next.", {
+    inline_keyboard: keyboard,
   });
 }
 
