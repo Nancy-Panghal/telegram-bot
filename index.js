@@ -9,8 +9,9 @@ const axios = require("axios");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
-const { sendLesson } = require('./lessonSender');
-const { initWatermark } = require('./watermark');
+const { sendLesson } = require("./lessonSender");
+const { initWatermark } = require("./watermark");
+const { initQuizSender, sendQuiz } = require("./quizSender");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -31,15 +32,18 @@ const supabase = createClient(
 
 // Initialize shared watermark and lessonSender modules with supabase
 initWatermark(supabase);
-const { init: initLessonSender } = require('./lessonSender');
+const { init: initLessonSender } = require("./lessonSender");
 initLessonSender({
   supabase,
-  sendMessage: async (chatId, text, keyboard) => sendMessage(chatId, text, keyboard),
+  sendMessage: async (chatId, text, keyboard) =>
+    sendMessage(chatId, text, keyboard),
   config: {
     LESSON_LINK_SECRET,
     ACADEMYKIT_URL,
   },
 });
+
+initQuizSender({ supabase, config: { TELEGRAM_API } });
 
 Object.entries({
   TELEGRAM_BOT_TOKEN: BOT_TOKEN,
@@ -271,8 +275,6 @@ async function handleStart(chatId, token) {
   );
 }
 
-
-
 async function markDone(chatId, lessonNumber) {
   const enrollment = await getEnrollment(chatId);
   if (!enrollment || !enrollment.courses) {
@@ -305,16 +307,29 @@ async function markDone(chatId, lessonNumber) {
 
   const keyboard = [];
   if (lesson?.summary_url) {
-    keyboard.push([{ text: "Summary", url: signResourceUrl(lesson.id, "summary", chatId) }]);
+    keyboard.push([
+      {
+        text: "📄 Summary",
+        url: signResourceUrl(lesson.id, "summary", chatId),
+      },
+    ]);
   }
   if (lesson?.notes_url) {
-    keyboard.push([{ text: "Notes", url: signResourceUrl(lesson.id, "notes", chatId) }]);
+    keyboard.push([
+      { text: "📝 Notes", url: signResourceUrl(lesson.id, "notes", chatId) },
+    ]);
   }
-  if (Array.isArray(lesson?.quiz_questions) && lesson.quiz_questions.length > 0) {
-    keyboard.push([{ text: "Quiz", url: signResourceUrl(lesson.id, "quiz", chatId) }]);
+  // Quiz: native Telegram poll instead of website link
+  if (
+    Array.isArray(lesson?.quiz_questions) &&
+    lesson.quiz_questions.length > 0
+  ) {
+    keyboard.push([
+      { text: "🧠 Take Quiz", callback_data: `quiz:${lessonNumber}` },
+    ]);
   }
-  keyboard.push([{ text: "Next lesson", callback_data: "lesson" }]);
-  keyboard.push([{ text: "Progress", callback_data: "progress" }]);
+  keyboard.push([{ text: "▶ Next lesson", callback_data: "lesson" }]);
+  keyboard.push([{ text: "📊 Progress", callback_data: "progress" }]);
 
   await sendMessage(chatId, "Lesson marked complete. Choose what to do next.", {
     inline_keyboard: keyboard,
@@ -355,6 +370,8 @@ async function handleUpdate(update) {
       const enrollment = await getEnrollment(chatId);
       return markDone(chatId, enrollment?.current_lesson || 1);
     }
+    
+
     return sendMessage(
       chatId,
       "Use /lesson, /progress, or open your course page and tap Start on Telegram.",
@@ -369,6 +386,8 @@ async function handleUpdate(update) {
     if (data === "progress") return sendProgress(chatId);
     if (data.startsWith("done:"))
       return markDone(chatId, Number(data.replace("done:", "")));
+    
+    if (data.startsWith('quiz:')) return sendQuiz(chatId, Number(data.replace('quiz:', '')));
   }
 }
 
