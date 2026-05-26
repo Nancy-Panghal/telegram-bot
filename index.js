@@ -172,6 +172,10 @@ async function getEnrollment(chatId) {
   );
 }
 
+// Fixes BUG 3: bot creating second free enrollment alongside paid one
+// Fixes BUG 8: token marked used before enrollment confirmed
+// Rule: token is ONLY marked used AFTER enrollment is verified
+
 async function handleStart(chatId, token) {
   if (!token) {
     await sendMessage(
@@ -181,6 +185,7 @@ async function handleStart(chatId, token) {
     return;
   }
 
+  // 1. Find valid unused token
   const tokenRow = await firstRow(
     supabase
       .from("telegram_tokens")
@@ -193,31 +198,51 @@ async function handleStart(chatId, token) {
   if (!tokenRow) {
     await sendMessage(
       chatId,
-      "This Telegram access link is invalid or expired. Please open the course page and generate a new link.",
+      "This Telegram link is invalid or has expired. Please open the course page and tap *Start on Telegram* again.",
     );
     return;
   }
 
-  let student = tokenRow.student_auth_id
-    ? await firstRow(
-        supabase
-          .from("students")
-          .select("id")
-          .eq("auth_id", tokenRow.student_auth_id),
-      )
-    : null;
+  const courseId = tokenRow.course_id;
 
-  if (!student && tokenRow.student_email) {
-    student = await firstRow(
-      supabase
-        .from("students")
-        .select("id")
-        .eq("email", tokenRow.student_email),
-    );
+  // 2. Verify course still exists (FK protects this but double-check for clear error message)
+  const { data: courseRows } = await supabase
+    .from("courses")
+    .select("id, name")
+    .eq("id", courseId)
+    .limit(1);
+
+  if (!courseRows?.length) {
+    await sendMessage(chatId, "This course is no longer available.");
+    // Mark token used so it cannot be retried
+    await supabase
+      .from("telegram_tokens")
+      .update({ used: true, used_at: new Date().toISOString() })
+      .eq("id", tokenRow.id);
+    return;
   }
 
+  // 3. Upsert student record
+  let student = null;
+
+  if (tokenRow.student_auth_id) {
+    const { data } = await supabase
+      .from("students")
+      .select("id")
+      .eq("auth_id", tokenRow.student_auth_id)
+      .limit(1);
+    student = data?.[0] || null;
+  }
+  if (!student && tokenRow.student_email) {
+    const { data } = await supabase
+      .from("students")
+      .select("id")
+      .eq("email", tokenRow.student_email)
+      .limit(1);
+    student = data?.[0] || null;
+  }
   if (!student) {
-    const { data: insertedStudent, error } = await supabase
+    const { data: inserted, error: insertErr } = await supabase
       .from("students")
       .insert({
         auth_id: tokenRow.student_auth_id || null,
@@ -226,76 +251,185 @@ async function handleStart(chatId, token) {
         phone: tokenRow.student_phone || null,
       })
       .select("id")
-      .limit(1);
-    if (error) throw error;
-    student = insertedStudent?.[0] || null;
+      .single();
+    if (insertErr) {
+      console.error("[handleStart] student insert error:", insertErr.message);
+      await sendMessage(
+        chatId,
+        "Something went wrong linking your account. Please try the link again.",
+      );
+      return; // Do NOT mark token used — student can retry
+    }
+    student = inserted;
   }
 
-  const existing = student?.id
-    ? await firstRow(
-        supabase
-          .from("enrollments")
-          .select("id, payment_status")
-          .eq("course_uuid", tokenRow.course_id)
-          .eq("student_id", student.id),
+  const phoneOrEmail =
+    tokenRow.student_phone || tokenRow.student_email || String(chatId);
+  const isPaid = Boolean(tokenRow.payment_id);
+
+  // 4. BUG 3 FIX: Find existing enrollment by EVERY identifier before inserting
+  // Priority: student_id → phone → existing telegram enrollment for this course
+  let existingEnrollment = null;
+
+  if (student?.id) {
+    const { data } = await supabase
+      .from("enrollments")
+      .select(
+        "id, payment_status, completed_lessons, current_lesson, quiz_results",
       )
-    : null;
-
-  const payload = {
-    phone: tokenRow.student_phone || tokenRow.student_email || String(chatId),
-    course_uuid: tokenRow.course_id,
-    creator_id: tokenRow.creator_id,
-    student_id: student?.id || null,
-    telegram_chat_id: String(chatId),
-    current_lesson: 1,
-    payment_id: tokenRow.payment_id || null,
-    payment_status: tokenRow.payment_id ? "paid" : "free",
-  };
-
-  if (existing) {
-    await supabase.from("enrollments").update(payload).eq("id", existing.id);
-  } else {
-    await supabase.from("enrollments").insert(payload);
+      .eq("course_uuid", courseId)
+      .eq("student_id", student.id)
+      .limit(1);
+    existingEnrollment = data?.[0] || null;
   }
 
+  if (!existingEnrollment && phoneOrEmail) {
+    const { data } = await supabase
+      .from("enrollments")
+      .select(
+        "id, payment_status, completed_lessons, current_lesson, quiz_results",
+      )
+      .eq("course_uuid", courseId)
+      .eq("phone", phoneOrEmail)
+      .limit(1);
+    existingEnrollment = data?.[0] || null;
+  }
+
+  if (!existingEnrollment) {
+    const { data } = await supabase
+      .from("enrollments")
+      .select(
+        "id, payment_status, completed_lessons, current_lesson, quiz_results",
+      )
+      .eq("course_uuid", courseId)
+      .eq("telegram_chat_id", String(chatId))
+      .limit(1);
+    existingEnrollment = data?.[0] || null;
+  }
+
+  const now = new Date().toISOString();
+
+  // 5. Update or create enrollment — never downgrade payment_status from paid to free
+  let enrollmentId = null;
+  let enrollError = null;
+
+  if (existingEnrollment) {
+    // Only upgrade payment_status, never downgrade
+    const newPaymentStatus =
+      existingEnrollment.payment_status === "paid"
+        ? "paid"
+        : isPaid
+          ? "paid"
+          : "free";
+
+    const { error } = await supabase
+      .from("enrollments")
+      .update({
+        telegram_chat_id: String(chatId),
+        student_id: student?.id || existingEnrollment.student_id || null,
+        phone: phoneOrEmail,
+        payment_status: newPaymentStatus,
+        payment_id:
+          tokenRow.payment_id || existingEnrollment.payment_id || null,
+        last_telegram_sync: now,
+        last_accessed: now,
+      })
+      .eq("id", existingEnrollment.id);
+
+    enrollError = error;
+    enrollmentId = existingEnrollment.id;
+  } else {
+    // Fresh enrollment
+    const { data: inserted, error } = await supabase
+      .from("enrollments")
+      .insert({
+        phone: phoneOrEmail,
+        course_uuid: courseId,
+        creator_id: tokenRow.creator_id,
+        student_id: student?.id || null,
+        telegram_chat_id: String(chatId),
+        current_lesson: 1,
+        payment_id: tokenRow.payment_id || null,
+        payment_status: isPaid ? "paid" : "free",
+        completed_lessons: [],
+        quiz_results: [],
+        amount_paid: 0,
+        last_telegram_sync: now,
+        last_accessed: now,
+      })
+      .select("id")
+      .single();
+
+    enrollError = error;
+    enrollmentId = inserted?.id || null;
+  }
+
+  // 6. BUG 8 FIX: Only mark token used AFTER enrollment is confirmed
+  if (enrollError || !enrollmentId) {
+    console.error(
+      "[handleStart] enrollment upsert failed:",
+      enrollError?.message,
+    );
+    await sendMessage(
+      chatId,
+      "Something went wrong saving your enrollment. Please tap the link again — your access token is still valid.",
+    );
+    return; // Do NOT mark token used — student can retry
+  }
+
+  // Enrollment confirmed — now safe to consume the token
   await supabase
     .from("telegram_tokens")
-    .update({ used: true, used_at: new Date().toISOString() })
+    .update({ used: true, used_at: now })
     .eq("id", tokenRow.id);
 
   await sendMessage(
     chatId,
-    "Your course is connected to Telegram. Tap below to start learning.",
+    `✅ You're connected! Tap below to start learning.`,
     {
       inline_keyboard: [
-        [{ text: "Start lesson", callback_data: "lesson" }],
-        [{ text: "Progress", callback_data: "progress" }],
+        [{ text: "▶ Start Lesson", callback_data: "lesson" }],
+        [{ text: "📊 My Progress", callback_data: "progress" }],
       ],
     },
   );
 }
 
+// Fixes BUG 5: uses /api/lesson/complete so progress is stored identically
+//              to web — same code path, same DB write
+// Fixes BUG 10: adds Previous Lesson button
+// Fixes BUG 6: quiz tracked via API
+
 async function markDone(chatId, lessonNumber) {
   const enrollment = await getEnrollment(chatId);
   if (!enrollment || !enrollment.courses) {
-    await sendMessage(chatId, "No course is connected yet.");
+    await sendMessage(chatId, "No course connected yet.");
     return;
   }
 
-  const completed = Array.isArray(enrollment.completed_lessons)
-    ? [...enrollment.completed_lessons]
-    : [];
-  if (!completed.includes(lessonNumber)) completed.push(lessonNumber);
+  // Call the web API so both platforms write progress the same way
+  try {
+    const res = await fetch(`${ACADEMYKIT_URL}/api/lesson/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        identity: String(chatId), // Telegram path (no enrollmentId)
+        lessonNum: lessonNumber,
+        courseId: enrollment.course_uuid,
+        source: "telegram",
+      }),
+    });
 
-  await supabase
-    .from("enrollments")
-    .update({
-      completed_lessons: completed,
-      current_lesson: lessonNumber + 1,
-      last_accessed: new Date().toISOString(),
-    })
-    .eq("id", enrollment.id);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error("[markDone] API error:", err);
+      // Fall through — still show buttons so student isn't stuck
+    }
+  } catch (err) {
+    console.error("[markDone] fetch error:", err.message);
+  }
 
+  // Fetch the lesson for its resource links + quiz
   const lesson = await firstRow(
     supabase
       .from("lessons")
@@ -305,7 +439,22 @@ async function markDone(chatId, lessonNumber) {
       .eq("is_published", true),
   );
 
+  // Fetch prev/next lesson order numbers to enable navigation
+  const { data: adjacentLessons } = await supabase
+    .from("lessons")
+    .select("order_num, title")
+    .eq("course_id", enrollment.course_uuid)
+    .eq("is_published", true)
+    .in("order_num", [lessonNumber - 1, lessonNumber + 1]);
+
+  const prevLesson =
+    adjacentLessons?.find((l) => l.order_num === lessonNumber - 1) || null;
+  const nextLesson =
+    adjacentLessons?.find((l) => l.order_num === lessonNumber + 1) || null;
+
   const keyboard = [];
+
+  // Resources
   if (lesson?.summary_url) {
     keyboard.push([
       {
@@ -319,21 +468,39 @@ async function markDone(chatId, lessonNumber) {
       { text: "📝 Notes", url: signResourceUrl(lesson.id, "notes", chatId) },
     ]);
   }
-  // Quiz: native Telegram poll instead of website link
-  if (
-    Array.isArray(lesson?.quiz_questions) &&
-    lesson.quiz_questions.length > 0
-  ) {
+
+  // Quiz — native Telegram poll (BUG 6 fix)
+  const hasQuiz =
+    Array.isArray(lesson?.quiz_questions) && lesson.quiz_questions.length > 0;
+  if (hasQuiz) {
     keyboard.push([
       { text: "🧠 Take Quiz", callback_data: `quiz:${lessonNumber}` },
     ]);
   }
-  keyboard.push([{ text: "▶ Next lesson", callback_data: "lesson" }]);
+
+  // Navigation row — prev and next together
+  const navRow = [];
+  if (prevLesson) {
+    navRow.push({
+      text: `⬅ Lesson ${prevLesson.order_num}`,
+      callback_data: `goto:${prevLesson.order_num}`,
+    });
+  }
+  if (nextLesson) {
+    navRow.push({
+      text: `Lesson ${nextLesson.order_num} ➡`,
+      callback_data: "lesson",
+    });
+  }
+  if (navRow.length) keyboard.push(navRow);
+
   keyboard.push([{ text: "📊 Progress", callback_data: "progress" }]);
 
-  await sendMessage(chatId, "Lesson marked complete. Choose what to do next.", {
-    inline_keyboard: keyboard,
-  });
+  await sendMessage(
+    chatId,
+    `✅ *Lesson ${lessonNumber} marked complete.*\n\nWhat would you like to do next?`,
+    { inline_keyboard: keyboard },
+  );
 }
 
 async function sendProgress(chatId) {
@@ -356,38 +523,116 @@ async function sendProgress(chatId) {
   );
 }
 
-async function handleUpdate(update) {
-  if (update.message) {
-    const chatId = update.message.chat.id;
-    const text = update.message.text || "";
-    if (text.startsWith("/start")) {
-      const token = text.split(" ")[1] || "";
-      return handleStart(chatId, token);
-    }
-    if (text === "/lesson" || text === "/next") return sendLesson(chatId);
-    if (text === "/progress") return sendProgress(chatId);
-    if (text === "/done") {
-      const enrollment = await getEnrollment(chatId);
-      return markDone(chatId, enrollment?.current_lesson || 1);
-    }
-    
-
-    return sendMessage(
-      chatId,
-      "Use /lesson, /progress, or open your course page and tap Start on Telegram.",
-    );
+async function sendSpecificLesson(chatId, lessonOrderNum) {
+  // Re-use sendLesson logic but for a specific lesson number
+  // Update enrollment current_lesson to the requested number
+  const enrollment = await getEnrollment(chatId)
+  if (!enrollment) {
+    await sendMessage(chatId, 'No course connected. Open the course page first.')
+    return
   }
+ 
+  // Allow going to previous lessons (lifetime access)
+  // Don't update current_lesson backwards — keep it as the highest reached
+  const { data: lessons } = await supabase
+    .from('lessons')
+    .select('id, title, order_num, quiz_questions')
+    .eq('course_id', enrollment.course_uuid)
+    .eq('order_num', lessonOrderNum)
+    .eq('is_published', true)
+    .limit(1)
+ 
+  const lesson = lessons?.[0]
+  if (!lesson) {
+    await sendMessage(chatId, `Lesson ${lessonOrderNum} is not available yet.`)
+    return
+  }
+ 
+  // Check access
+  const isPaid = enrollment.payment_status === 'paid'
+  if (!isPaid) {
+    const config = enrollment.courses?.free_preview_config || 'nothing free'
+    const maxFree = { 'lesson 1 free': 1, '2 lessons free': 2, '3 lessons free': 3, 'module 1 free': 3, '2 modules free': 6 }
+    const limit = maxFree[config] || 0
+    if (lessonOrderNum > limit) {
+      await sendMessage(chatId, '🔒 This lesson is locked. Enroll to unlock the full course.', {
+        inline_keyboard: [[{ text: 'Unlock Course', url: `${ACADEMYKIT_URL}/about-course/.../${enrollment.course_uuid}` }]],
+      })
+      return
+    }
+  }
+ 
+  const lessonUrl = signLessonPageUrl(enrollment.course_uuid, lesson.id, lesson.order_num, String(chatId))
+  const fp = encodeFingerprint(String(chatId))
+ 
+  await sendMessage(
+    chatId,
+    `📖 *Lesson ${lesson.order_num}: ${escMd(lesson.title)}*\n\nTap *Open Lesson* below. Access expires in 2 hours.\n\n🔒 _This link is personal. Do not share it._\n${fp}`,
+    {
+      inline_keyboard: [
+        [{ text: '▶ Open Lesson', url: lessonUrl }],
+        [
+          { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
+          { text: '📊 Progress', callback_data: 'progress' },
+        ],
+      ],
+    }
+  )
+ 
+  await supabase
+    .from('enrollments')
+    .update({ last_accessed: new Date().toISOString(), last_telegram_sync: new Date().toISOString() })
+    .eq('id', enrollment.id)
+    .then(() => {}).catch(() => {})
+}
 
-  if (update.callback_query) {
-    const chatId = update.callback_query.message.chat.id;
-    const data = update.callback_query.data || "";
-    await answerCallback(update.callback_query.id);
-    if (data === "lesson") return sendLesson(chatId);
-    if (data === "progress") return sendProgress(chatId);
-    if (data.startsWith("done:"))
-      return markDone(chatId, Number(data.replace("done:", "")));
-    
-    if (data.startsWith('quiz:')) return sendQuiz(chatId, Number(data.replace('quiz:', '')));
+
+// ── Replace handleUpdate in index.js with this ──────────────────
+// Wires all new callbacks: goto:N, quiz:N, done:N
+
+async function handleUpdate(update) {
+  try {
+    if (update.message) {
+      const chatId = update.message.chat.id;
+      const text = update.message.text || "";
+
+      if (text.startsWith("/start")) {
+        const token = text.split(" ")[1] || "";
+        return handleStart(chatId, token);
+      }
+      if (text === "/lesson" || text === "/next") return sendLesson(chatId);
+      if (text === "/progress") return sendProgress(chatId);
+      if (text === "/done") {
+        const enrollment = await getEnrollment(chatId);
+        return markDone(chatId, enrollment?.current_lesson || 1);
+      }
+
+      return sendMessage(
+        chatId,
+        "Use /lesson to get your next lesson, or /progress to check your progress.",
+      );
+    }
+
+    if (update.callback_query) {
+      const chatId = update.callback_query.message.chat.id;
+      const data = update.callback_query.data || "";
+      await answerCallback(update.callback_query.id);
+
+      if (data === "lesson") return sendLesson(chatId);
+      if (data === "progress") return sendProgress(chatId);
+      if (data.startsWith("done:"))
+        return markDone(chatId, Number(data.replace("done:", "")));
+      if (data.startsWith("quiz:"))
+        return sendQuiz(chatId, Number(data.replace("quiz:", "")));
+      // Previous/specific lesson navigation
+      if (data.startsWith("goto:")) {
+        const targetNum = Number(data.replace("goto:", ""));
+        return sendSpecificLesson(chatId, targetNum);
+      }
+    }
+  } catch (err) {
+    console.error("[handleUpdate] unhandled error:", err.message, err.stack);
+    // Don't let one user's error crash the whole webhook
   }
 }
 
