@@ -1,30 +1,18 @@
 /**
  * telegram-bot/lessonSender.js
- * ─────────────────────────────────────────────────────────────────
- * Drop-in replacement for the sendLesson function in index.js.
- * Uses the new /api/lesson/view signed URL so students open
- * lesson content on YOUR website (with watermark + proxy).
  *
- * HOW TO USE:
- * 1. Copy this file into telegram-bot/
- * 2. In index.js add at top:
- *    const { sendLesson } = require('./lessonSender')
- * 3. Remove the old sendLesson function from index.js
- * 4. The exported sendLesson uses the same globals from index.js
- *    — pass them in via init() below.
- * ─────────────────────────────────────────────────────────────────
+ * Changes from original:
+ *  - signLessonPageUrl, encodeFingerprint, escMd are now exported
+ *    so index.js can import them for sendSpecificLesson
+ *  - Everything else is identical
  */
 
 const crypto = require('crypto')
 const axios  = require('axios')
-const { checkRateLimit, encodeFingerprint, logLessonAccess } = require('./watermark')
+const { checkRateLimit, logLessonAccess } = require('./watermark')
 
 let _supabase, _sendMessage, _config
 
-/**
- * Call this once from index.js to wire up dependencies.
- * @param {{ supabase, sendMessage, config: { LESSON_LINK_SECRET, ACADEMYKIT_URL } }} deps
- */
 function init({ supabase, sendMessage, config }) {
   _supabase    = supabase
   _sendMessage = sendMessage
@@ -42,12 +30,35 @@ function signLessonPageUrl(courseId, lessonId, lessonNum, identity) {
     .digest('hex')
 
   const params = new URLSearchParams({
-    courseId, lessonId,
-    lesson: String(lessonNum),
-    identity, exp: String(exp), sig,
+    courseId,
+    lessonId,
+    lesson:   String(lessonNum),
+    identity,
+    exp:      String(exp),
+    sig,
   })
 
   return `${_config.ACADEMYKIT_URL}/api/lesson/view?${params.toString()}`
+}
+
+// ── Zero-width fingerprint (mirrors lib/signer.ts) ────────────────
+const ZWS  = '\u200B'   // bit 0
+const ZWNJ = '\u200C'   // bit 1
+
+function encodeFingerprint(text, maxChars = 12) {
+  let result = ''
+  for (let i = 0; i < Math.min(text.length, maxChars); i++) {
+    const code = text.charCodeAt(i)
+    for (let bit = 7; bit >= 0; bit--) {
+      result += (code >> bit) & 1 ? ZWNJ : ZWS
+    }
+  }
+  return result
+}
+
+// ── Markdown escaper ──────────────────────────────────────────────
+function escMd(text) {
+  return String(text || '').replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1')
 }
 
 // ── Main sendLesson ────────────────────────────────────────────────
@@ -87,14 +98,12 @@ async function sendLesson(chatId) {
     await _sendMessage(
       chatId,
       `🔒 *Free preview complete\\.*\n\nUnlock the full course to continue learning\\.`,
-      {
-        inline_keyboard: [[{ text: 'Pay and unlock course', url: courseUrl }]],
-      }
+      { inline_keyboard: [[{ text: 'Pay and unlock course', url: courseUrl }]] }
     )
     return
   }
 
-  // 4. Fetch lesson (no module join — avoids FK error)
+  // 4. Fetch lesson
   const { data: lessons, error: lessonErr } = await _supabase
     .from('lessons')
     .select('*')
@@ -127,7 +136,7 @@ async function sendLesson(chatId) {
         `You are caught up\\. Lesson ${lessonNum} is not published yet\\.`,
         `Progress: ${Math.min(lessonNum - 1, publishedCount || 0)}/${total} lessons watched\\.`,
         nextDate ? `Next lesson is planned for *${escMd(nextDate)}*\\.` : `The creator has not announced the next lesson date yet\\.`,
-        endDate ? `Course planned end date: *${escMd(endDate)}*\\.` : '',
+        endDate  ? `Course planned end date: *${escMd(endDate)}*\\.` : '',
         infoMessage ? `\nCreator note: ${infoMessage}` : '',
       ].filter(Boolean).join('\n')
     )
@@ -136,10 +145,10 @@ async function sendLesson(chatId) {
 
   const lesson = lessons[0]
 
-  // 5. Generate signed lesson page URL (opens on your website with watermark)
+  // 5. Generate signed lesson page URL
   const lessonUrl = signLessonPageUrl(course.id, lesson.id, lesson.order_num, String(chatId))
 
-  // 6. Build watermarked message with invisible fingerprint
+  // 6. Build watermarked message
   const fp = encodeFingerprint(String(chatId))
   const durationLine = lesson.duration ? `⏱ ${lesson.duration}\n` : ''
 
@@ -152,7 +161,6 @@ async function sendLesson(chatId) {
     fp,
   ].join('\n')
 
-  // 7. Send message — fire-and-forget logging
   await _sendMessage(chatId, text, {
     inline_keyboard: [
       [{ text: '▶ Open Lesson', url: lessonUrl }],
@@ -163,21 +171,21 @@ async function sendLesson(chatId) {
     ],
   })
 
-  // 8. Update last_accessed (non-blocking)
+  // Update last_accessed (non-blocking)
   _supabase
     .from('enrollments')
     .update({ last_accessed: new Date().toISOString() })
     .eq('id', enrollment.id)
     .then(() => {}).catch(() => {})
 
-  // 9. Log access for piracy detection (non-blocking)
+  // Log access (non-blocking)
   logLessonAccess(String(chatId), lesson.id, course.id).catch(() => {})
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
 function isLessonAllowed(enrollment, lessonNum) {
   if (enrollment.payment_status === 'paid') return true
-  const config = enrollment.courses?.free_preview_config || 'nothing free'
+  const config  = enrollment.courses?.free_preview_config || 'nothing free'
   const maxFree = { 'lesson 1 free': 1, '2 lessons free': 2, '3 lessons free': 3, 'module 1 free': 3, '2 modules free': 6 }
   return lessonNum <= (maxFree[config] || 0)
 }
@@ -186,8 +194,11 @@ function slugify(text) {
   return String(text || '').toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').trim()
 }
 
-function escMd(text) {
-  return String(text || '').replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1')
+module.exports = {
+  init,
+  sendLesson,
+  // Exported so index.js can use them in sendSpecificLesson
+  signLessonPageUrl,
+  encodeFingerprint,
+  escMd,
 }
-
-module.exports = { init, sendLesson }
