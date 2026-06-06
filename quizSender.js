@@ -132,15 +132,18 @@ async function sendQuiz(chatId, lessonOrderNum) {
 
   // 5. Score summary + next action buttons
   await sleep(1000)
+  const keyboard = [
+    [{ text: '▶ Next Lesson', callback_data: 'lesson' }],
+  ]
+  if (lessonOrderNum > 1) {
+    keyboard.push([{ text: '⬅ Previous Lesson', callback_data: `goto:${lessonOrderNum - 1}` }])
+  }
+  keyboard.push([{ text: '📊 My Progress', callback_data: 'progress' }])
+
   await sendMessage(
     chatId,
     `✅ *Quiz sent\\!*\n\nAnswer each poll above\\. Telegram shows the correct answer right after you respond\\.\n\nTotal questions: *${questions.length}*`,
-    {
-      inline_keyboard: [
-        [{ text: '▶ Next Lesson', callback_data: 'lesson' }],
-        [{ text: '📊 My Progress', callback_data: 'progress' }],
-      ],
-    }
+    { inline_keyboard: keyboard }
   )
 }
 

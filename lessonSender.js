@@ -161,15 +161,18 @@ async function sendLesson(chatId) {
     fp,
   ].join('\n')
 
-  await _sendMessage(chatId, text, {
-    inline_keyboard: [
-      [{ text: '▶ Open Lesson', url: lessonUrl }],
-      [
-        { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
-        { text: '📊 Progress',  callback_data: 'progress' },
-      ],
+  const keyboard = [
+    [{ text: '▶ Open Lesson', url: lessonUrl }],
+    [
+      { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
+      { text: '📊 Progress',  callback_data: 'progress' },
     ],
-  })
+  ]
+  if (lesson.order_num > 1) {
+    keyboard.push([{ text: '⬅ Previous Lesson', callback_data: `goto:${lesson.order_num - 1}` }])
+  }
+
+  await _sendMessage(chatId, text, { inline_keyboard: keyboard })
 
   // Update last_accessed (non-blocking)
   _supabase

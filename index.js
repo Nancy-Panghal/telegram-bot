@@ -513,7 +513,7 @@ async function sendProgress(chatId) {
   const completed = (enrollment.completed_lessons || []).length;
   const total = enrollment.courses.total_lessons || 0;
   const percent =
-    total > 0 ? Math.min(Math.round((completed / total) * 100), 100) : 0;
+  total > 0 ? Math.min(Math.round((completed / total) * 100), 100) : 0;
   await sendMessage(
     chatId,
     `Progress: ${completed}/${total} lessons complete (${percent}%).\nCurrent lesson: ${enrollment.current_lesson || 1}`,
@@ -521,6 +521,18 @@ async function sendProgress(chatId) {
       inline_keyboard: [[{ text: "Continue", callback_data: "lesson" }]],
     },
   );
+}
+
+async function removeInlineKeyboard(chatId, messageId) {
+  try {
+    await axios.post(`${TELEGRAM_API}/editMessageReplyMarkup`, {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: [] }
+    }, { timeout: 5000 });
+  } catch (err) {
+    console.error("[removeInlineKeyboard] failed:", err.message);
+  }
 }
 
 async function sendSpecificLesson(chatId, lessonOrderNum) {
@@ -555,8 +567,10 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
     const maxFree = { 'lesson 1 free': 1, '2 lessons free': 2, '3 lessons free': 3, 'module 1 free': 3, '2 modules free': 6 }
     const limit = maxFree[config] || 0
     if (lessonOrderNum > limit) {
+      const course = enrollment.courses
+      const courseUrl = `${ACADEMYKIT_URL}/about-course/${slugify(course?.host_name || 'creator')}/${slugify(course?.name || 'course')}/${enrollment.course_uuid}`
       await sendMessage(chatId, '🔒 This lesson is locked. Enroll to unlock the full course.', {
-        inline_keyboard: [[{ text: 'Unlock Course', url: `${ACADEMYKIT_URL}/about-course/.../${enrollment.course_uuid}` }]],
+        inline_keyboard: [[{ text: 'Pay and unlock course', url: courseUrl }]],
       })
       return
     }
@@ -565,18 +579,52 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
   const lessonUrl = signLessonPageUrl(enrollment.course_uuid, lesson.id, lesson.order_num, String(chatId))
   const fp = encodeFingerprint(String(chatId))
  
+  // Detect if this is a review/watch-again scenario
+  const isWatchAgain = lesson.order_num < (enrollment.current_lesson || 1)
+  const headerText = isWatchAgain
+    ? `🔄 *Watching Again: Lesson ${lesson.order_num}: ${escMd(lesson.title)}*`
+    : `📖 *Lesson ${lesson.order_num}: ${escMd(lesson.title)}*`
+
+  const keyboard = [
+    [{ text: '▶ Open Lesson', url: lessonUrl }],
+    [
+      { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
+      { text: '📊 Progress', callback_data: 'progress' },
+    ],
+  ]
+
+  const navRow = []
+  if (lesson.order_num > 1) {
+    navRow.push({
+      text: `⬅ Lesson ${lesson.order_num - 1}`,
+      callback_data: `goto:${lesson.order_num - 1}`,
+    })
+  }
+
+  // Check if next published lesson exists
+  const { data: nextLessons } = await supabase
+    .from('lessons')
+    .select('order_num')
+    .eq('course_id', enrollment.course_uuid)
+    .eq('order_num', lesson.order_num + 1)
+    .eq('is_published', true)
+    .limit(1)
+
+  if (nextLessons && nextLessons.length > 0) {
+    navRow.push({
+      text: `Lesson ${lesson.order_num + 1} ➡`,
+      callback_data: `goto:${lesson.order_num + 1}`,
+    })
+  }
+
+  if (navRow.length > 0) {
+    keyboard.push(navRow)
+  }
+
   await sendMessage(
     chatId,
-    `📖 *Lesson ${lesson.order_num}: ${escMd(lesson.title)}*\n\nTap *Open Lesson* below. Access expires in 2 hours.\n\n🔒 _This link is personal. Do not share it._\n${fp}`,
-    {
-      inline_keyboard: [
-        [{ text: '▶ Open Lesson', url: lessonUrl }],
-        [
-          { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
-          { text: '📊 Progress', callback_data: 'progress' },
-        ],
-      ],
-    }
+    `${headerText}\n\nTap *Open Lesson* below. Access expires in 2 hours.\n\n🔒 _This link is personal. Do not share it._\n${fp}`,
+    { inline_keyboard: keyboard }
   )
  
   await supabase
@@ -585,7 +633,6 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
     .eq('id', enrollment.id)
     .then(() => {}).catch(() => {})
 }
-
 
 // ── Replace handleUpdate in index.js with this ──────────────────
 // Wires all new callbacks: goto:N, quiz:N, done:N
@@ -598,6 +645,10 @@ async function handleUpdate(update) {
 
       if (text.startsWith("/start")) {
         const token = text.split(" ")[1] || "";
+        if (token.startsWith("done_")) {
+          const lessonNumber = Number(token.replace("done_", ""));
+          return markDone(chatId, lessonNumber);
+        }
         return handleStart(chatId, token);
       }
       if (text === "/lesson" || text === "/next") return sendLesson(chatId);
@@ -615,8 +666,12 @@ async function handleUpdate(update) {
 
     if (update.callback_query) {
       const chatId = update.callback_query.message.chat.id;
+      const messageId = update.callback_query.message.message_id;
       const data = update.callback_query.data || "";
       await answerCallback(update.callback_query.id);
+
+      // Disable/remove buttons on the clicked message to prevent double-clicking or scrolling back to old CTAs
+      await removeInlineKeyboard(chatId, messageId);
 
       if (data === "lesson") return sendLesson(chatId);
       if (data === "progress") return sendProgress(chatId);
