@@ -9,7 +9,7 @@ const axios = require("axios");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
-const { sendLesson } = require("./lessonSender");
+const { sendLesson, signLessonPageUrl, encodeFingerprint, escMd } = require("./lessonSender");
 const { initWatermark } = require("./watermark");
 const { initQuizSender, sendQuiz } = require("./quizSender");
 
