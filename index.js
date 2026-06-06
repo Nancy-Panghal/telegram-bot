@@ -384,15 +384,16 @@ async function handleStart(chatId, token) {
     .eq("id", tokenRow.id);
 
   await sendMessage(
-    chatId,
-    `✅ You're connected! Tap below to start learning.`,
-    {
-      inline_keyboard: [
-        [{ text: "▶ Start Lesson", callback_data: "lesson" }],
-        [{ text: "📊 My Progress", callback_data: "progress" }],
-      ],
-    },
-  );
+  chatId,
+  `✅ You're connected\\! Tap below to start learning\\.\n\n📚 You can also view all your enrolled courses at any time:`,
+  {
+    inline_keyboard: [
+      [{ text: "▶ Start Lesson", callback_data: "lesson" }],
+      [{ text: "📊 My Progress", callback_data: "progress" }],
+      [{ text: "📚 My Courses Dashboard", url: `${ACADEMYKIT_URL}/my-courses` }],
+    ],
+  },
+);
 }
 
 // Fixes BUG 5: uses /api/lesson/complete so progress is stored identically
