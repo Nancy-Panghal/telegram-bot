@@ -692,6 +692,112 @@ async function handleUpdate(update) {
   }
 }
 
+// ── Live session reminders (runs every 5 minutes) ─────────────────
+// Sends 24h and 15min reminders to all enrolled students with telegram_chat_id
+
+async function sendLiveReminders() {
+  try {
+    const now = new Date()
+
+    // 24h window: sessions scheduled between 23h55m and 24h05m from now
+    const h24Start = new Date(now.getTime() + 23 * 60 * 60 * 1000 + 55 * 60 * 1000)
+    const h24End   = new Date(now.getTime() + 24 * 60 * 60 * 1000 +  5 * 60 * 1000)
+
+    // 15min window: sessions scheduled between 10min and 20min from now
+    const m15Start = new Date(now.getTime() + 10 * 60 * 1000)
+    const m15End   = new Date(now.getTime() + 20 * 60 * 1000)
+
+    // Fetch sessions needing 24h reminder
+    const { data: sessions24h } = await supabase
+      .from('live_sessions')
+      .select('id, course_id, title, scheduled_at, duration_minutes, join_url')
+      .eq('reminder_24h_sent', false)
+      .gte('scheduled_at', h24Start.toISOString())
+      .lte('scheduled_at', h24End.toISOString())
+
+    // Fetch sessions needing 15min reminder
+    const { data: sessions15m } = await supabase
+      .from('live_sessions')
+      .select('id, course_id, title, scheduled_at, duration_minutes, join_url')
+      .eq('reminder_15m_sent', false)
+      .gte('scheduled_at', m15Start.toISOString())
+      .lte('scheduled_at', m15End.toISOString())
+
+    const allSessions = [
+      ...(sessions24h || []).map(s => ({ ...s, reminderType: '24h' })),
+      ...(sessions15m || []).map(s => ({ ...s, reminderType: '15m' })),
+    ]
+
+    if (allSessions.length === 0) return
+
+    for (const session of allSessions) {
+      // Get all paid enrollments with telegram_chat_id for this course
+      const { data: enrollments } = await supabase
+        .from('enrollments')
+        .select('telegram_chat_id')
+        .eq('course_uuid', session.course_id)
+        .eq('payment_status', 'paid')
+        .not('telegram_chat_id', 'is', null)
+
+      if (!enrollments || enrollments.length === 0) {
+        // Mark sent even if no students — prevents retrying empty courses
+        await supabase.from('live_sessions').update(
+          session.reminderType === '24h'
+            ? { reminder_24h_sent: true }
+            : { reminder_15m_sent: true }
+        ).eq('id', session.id)
+        continue
+      }
+
+      const sessionTime = new Date(session.scheduled_at).toLocaleString('en-IN', {
+        day: 'numeric', month: 'short',
+        hour: 'numeric', minute: '2-digit',
+        timeZone: 'Asia/Kolkata',
+      })
+
+      const message = session.reminderType === '24h'
+        ? `📅 *Live class tomorrow at ${escMd(sessionTime)} IST*\n\nTopic: *${escMd(session.title)}*\nDuration: ${session.duration_minutes} min\n\nJoin here: ${session.join_url}`
+        : `🔴 *Live class starts in 15 minutes\\!*\n\nTopic: *${escMd(session.title)}*\n\nJoin now: ${session.join_url}`
+
+      let delivered = 0
+      for (let i = 0; i < enrollments.length; i++) {
+        const chatId = enrollments[i].telegram_chat_id
+        try {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: message,
+            parse_mode: 'Markdown',
+            protect_content: true,
+            disable_web_page_preview: false,
+          }, { timeout: 10000 })
+          delivered++
+        } catch (err) {
+          // 403 = student blocked bot — expected, non-fatal
+          console.warn(`[reminders] failed to send to ${chatId}:`, err.response?.data?.description || err.message)
+        }
+        // Rate limit: 20/sec
+        if (i < enrollments.length - 1) await new Promise(r => setTimeout(r, 50))
+      }
+
+      console.log(`[reminders] ${session.reminderType} for "${session.title}": ${delivered}/${enrollments.length} delivered`)
+
+      // Mark reminder as sent
+      await supabase.from('live_sessions').update(
+        session.reminderType === '24h'
+          ? { reminder_24h_sent: true }
+          : { reminder_15m_sent: true }
+      ).eq('id', session.id)
+    }
+  } catch (err) {
+    console.error('[reminders] error:', err.message)
+  }
+}
+
+// Run every 5 minutes
+setInterval(sendLiveReminders, 5 * 60 * 1000)
+// Also run once on startup (after 10s so DB connection is ready)
+setTimeout(sendLiveReminders, 10 * 1000)
+
 app.post("/webhook", async (req, res) => {
   const secretHeader = req.header("x-telegram-bot-api-secret-token");
   if (WEBHOOK_SECRET && secretHeader !== WEBHOOK_SECRET) {
