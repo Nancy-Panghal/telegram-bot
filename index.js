@@ -12,6 +12,16 @@ const { createClient } = require("@supabase/supabase-js");
 const { sendLesson, signLessonPageUrl, encodeFingerprint, escMd } = require("./lessonSender");
 const { initWatermark } = require("./watermark");
 const { initQuizSender, sendQuiz } = require("./quizSender");
+const {
+  initAssignmentSender,
+  sendAssignmentPrompt,
+  beginAssignmentSubmit,
+  submitAssignmentText,
+  submitAssignmentFile,
+  getRequiredAssignmentBlock,
+  cancelPending,
+  hasPendingSubmission,
+} = require("./assignmentSender");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -44,6 +54,11 @@ initLessonSender({
 });
 
 initQuizSender({ supabase, config: { TELEGRAM_API } });
+initAssignmentSender({
+  supabase,
+  sendMessage: async (chatId, text, keyboard) => sendMessage(chatId, text, keyboard),
+  config: { TELEGRAM_API, BOT_TOKEN },
+});
 
 Object.entries({
   TELEGRAM_BOT_TOKEN: BOT_TOKEN,
@@ -430,15 +445,26 @@ async function markDone(chatId, lessonNumber) {
     console.error("[markDone] fetch error:", err.message);
   }
 
-  // Fetch the lesson for its resource links + quiz
+  // Fetch the lesson for its resource links + quiz + assignment
   const lesson = await firstRow(
     supabase
       .from("lessons")
-      .select("id, summary_url, notes_url, quiz_questions")
+      .select("id, summary_url, notes_url, quiz_questions, assignment_prompt, assignment_required")
       .eq("course_id", enrollment.course_uuid)
       .eq("order_num", lessonNumber)
       .eq("is_published", true),
   );
+
+  let assignmentBlocksNext = false
+  if (lesson?.assignment_required && lesson?.assignment_prompt) {
+    const { data: existingAssignment } = await supabase
+      .from("assignments")
+      .select("id")
+      .eq("enrollment_id", enrollment.id)
+      .eq("lesson_id", lesson.id)
+      .maybeSingle()
+    assignmentBlocksNext = !existingAssignment
+  }
 
   // Fetch prev/next lesson order numbers to enable navigation
   const { data: adjacentLessons } = await supabase
@@ -487,7 +513,7 @@ async function markDone(chatId, lessonNumber) {
       callback_data: `goto:${prevLesson.order_num}`,
     });
   }
-  if (nextLesson) {
+  if (nextLesson && !assignmentBlocksNext) {
     navRow.push({
       text: `Lesson ${nextLesson.order_num} ➡`,
       callback_data: "lesson",
@@ -502,6 +528,9 @@ async function markDone(chatId, lessonNumber) {
     `✅ *Lesson ${lessonNumber} marked complete.*\n\nWhat would you like to do next?`,
     { inline_keyboard: keyboard },
   );
+
+  // Assignment prompt after lesson completion (Feature 6)
+  await sendAssignmentPrompt(chatId, lessonNumber);
 }
 
 async function sendProgress(chatId) {
@@ -543,6 +572,23 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
   if (!enrollment) {
     await sendMessage(chatId, 'No course connected. Open the course page first.')
     return
+  }
+
+  const currentLesson = enrollment.current_lesson || 1
+  if (lessonOrderNum > currentLesson) {
+    const assignmentBlock = await getRequiredAssignmentBlock(enrollment, lessonOrderNum)
+    if (assignmentBlock) {
+      await sendMessage(
+        chatId,
+        `🔒 *Assignment required*\n\nComplete the assignment for Lesson ${assignmentBlock.prevLessonNum} before continuing.`,
+        {
+          inline_keyboard: [
+            [{ text: '📝 Submit Assignment', callback_data: `assign:${assignmentBlock.prevLessonNum}` }],
+          ],
+        },
+      )
+      return
+    }
   }
  
   // Allow going to previous lessons (lifetime access)
@@ -658,6 +704,22 @@ async function handleUpdate(update) {
         const enrollment = await getEnrollment(chatId);
         return markDone(chatId, enrollment?.current_lesson || 1);
       }
+      if (text === "/cancel") {
+        if (hasPendingSubmission(chatId)) {
+          cancelPending(chatId);
+          return sendMessage(chatId, "Assignment submission cancelled\\.");
+        }
+        return sendMessage(chatId, "Nothing to cancel\\.");
+      }
+
+      if (hasPendingSubmission(chatId)) {
+        if (update.message.document || (update.message.photo && update.message.photo.length)) {
+          return submitAssignmentFile(chatId, update.message);
+        }
+        if (text && !text.startsWith("/")) {
+          return submitAssignmentText(chatId, text);
+        }
+      }
 
       return sendMessage(
         chatId,
@@ -680,6 +742,8 @@ async function handleUpdate(update) {
         return markDone(chatId, Number(data.replace("done:", "")));
       if (data.startsWith("quiz:"))
         return sendQuiz(chatId, Number(data.replace("quiz:", "")));
+      if (data.startsWith("assign:"))
+        return beginAssignmentSubmit(chatId, Number(data.replace("assign:", "")));
       // Previous/specific lesson navigation
       if (data.startsWith("goto:")) {
         const targetNum = Number(data.replace("goto:", ""));

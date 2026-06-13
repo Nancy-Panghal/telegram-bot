@@ -10,6 +10,7 @@
 const crypto = require('crypto')
 const axios  = require('axios')
 const { checkRateLimit, logLessonAccess } = require('./watermark')
+const { getRequiredAssignmentBlock } = require('./assignmentSender')
 
 let _supabase, _sendMessage, _config
 
@@ -90,6 +91,21 @@ async function sendLesson(chatId) {
   const enrollment = enrollments[0]
   const course     = enrollment.courses
   const lessonNum  = enrollment.current_lesson || 1
+
+  // Required assignment on previous lesson must be submitted first
+  const assignmentBlock = await getRequiredAssignmentBlock(enrollment, lessonNum)
+  if (assignmentBlock) {
+    await _sendMessage(
+      chatId,
+      `🔒 *Assignment required*\n\nComplete the assignment for Lesson ${assignmentBlock.prevLessonNum} before continuing\\.\n\n${escMd(String(assignmentBlock.prompt).slice(0, 400))}`,
+      {
+        inline_keyboard: [
+          [{ text: '📝 Submit Assignment', callback_data: `assign:${assignmentBlock.prevLessonNum}` }],
+        ],
+      },
+    )
+    return
+  }
 
   // 3. Free preview check
   const allowed = isLessonAllowed(enrollment, lessonNum)
