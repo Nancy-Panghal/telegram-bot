@@ -92,6 +92,16 @@ async function sendLesson(chatId) {
   const course     = enrollment.courses
   const lessonNum  = enrollment.current_lesson || 1
 
+  // Draft courses: only paid students retain access.
+  // Free preview users are blocked — they haven't paid.
+  if (course.is_published === false && enrollment.payment_status !== 'paid') {
+    await _sendMessage(
+      chatId,
+      '⏸ This course is temporarily unavailable\\. Please check back later or contact your instructor\\.'
+    )
+    return
+  }
+
   // Required assignment on previous lesson must be submitted first
   const assignmentBlock = await getRequiredAssignmentBlock(enrollment, lessonNum)
   if (assignmentBlock) {

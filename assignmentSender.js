@@ -103,7 +103,7 @@ async function getEnrollment(chatId) {
 async function getLesson(courseId, orderNum) {
   const { data } = await _supabase
     .from('lessons')
-    .select('id, title, order_num, assignment_prompt, assignment_required')
+    .select('id, title, order_num, assignment_prompt, assignment_required, assignment_file_url, assignment_file_name')
     .eq('course_id', courseId)
     .eq('order_num', orderNum)
     .eq('is_published', true)
@@ -152,10 +152,18 @@ async function sendAssignmentPrompt(chatId, lessonOrderNum) {
   const requiredLabel = lesson.assignment_required ? ' *(Required)*' : ' *(Optional)*'
   const promptText = escMd(String(lesson.assignment_prompt).slice(0, 800))
 
+  let message = `📝 *Assignment for Lesson ${lessonOrderNum}: ${escMd(lesson.title)}*${requiredLabel}\n\n${promptText}`
+  
+  if (lesson.assignment_file_url) {
+    message += `\n\n📎 *Attachment*: [${escMd(lesson.assignment_file_name || 'File')}](${lesson.assignment_file_url})`
+  }
+  
+  message += `\n\nTap *Submit Assignment* then send your answer as text or attach a file \\(TXT, Markdown, PDF, Word, or image — max 5 MB\\)\\.`
+
   if (existing) {
     await _sendMessage(
       chatId,
-      `📝 *Assignment for Lesson ${lessonOrderNum}*${requiredLabel}\n\n${promptText}\n\n✅ You already submitted this assignment\\. Status: *${existing.status}*\\.`,
+      `${message}\n\n✅ You already submitted this assignment\\. Status: *${existing.status}*\\.`,
     )
     return
   }
@@ -172,7 +180,7 @@ async function sendAssignmentPrompt(chatId, lessonOrderNum) {
 
   await _sendMessage(
     chatId,
-    `📝 *Assignment for Lesson ${lessonOrderNum}: ${escMd(lesson.title)}*${requiredLabel}\n\n${promptText}\n\nTap *Submit Assignment* then send your answer as text or attach a file \\(TXT, Markdown, PDF, Word, or image — max 5 MB\\)\\.`,
+    message,
     keyboard,
   )
 }
