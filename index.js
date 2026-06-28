@@ -30,9 +30,16 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const ACADEMYKIT_URL = (process.env.ACADEMYKIT_URL || "").replace(/\/$/, "");
 const LESSON_LINK_SECRET =
+  process.env.LESSON_LINK_SECRET ||
   process.env.TELEGRAM_LINK_SECRET ||
   process.env.WHATSAPP_LINK_SECRET ||
-  WEBHOOK_SECRET;
+  "";
+if (!LESSON_LINK_SECRET) {
+  console.error(
+    "[telegram-bot] No LESSON_LINK_SECRET / TELEGRAM_LINK_SECRET / WHATSAPP_LINK_SECRET set — " +
+    "every lesson and resource link this bot signs will fail verification on the website."
+  );
+}
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 const supabase = createClient(
