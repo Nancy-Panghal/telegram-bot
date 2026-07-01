@@ -50,7 +50,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,  // service role key — bypasses RLS for bot operations
 );
 
 // Initialize shared watermark and lessonSender modules with supabase
