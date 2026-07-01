@@ -40,6 +40,12 @@ if (!LESSON_LINK_SECRET) {
     "every lesson and resource link this bot signs will fail verification on the website."
   );
 }
+
+function normalizePhone(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, "");
+  return digits || null;
+}
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 const supabase = createClient(
@@ -263,6 +269,14 @@ async function handleStart(chatId, token) {
       .limit(1);
     student = data?.[0] || null;
   }
+  if (!student && normalizePhone(tokenRow.student_phone)) {
+    const { data } = await supabase
+      .from("students")
+      .select("id")
+      .eq("phone", normalizePhone(tokenRow.student_phone))
+      .limit(1);
+    student = data?.[0] || null;
+  }
   if (!student) {
     const { data: inserted, error: insertErr } = await supabase
       .from("students")
@@ -286,7 +300,7 @@ async function handleStart(chatId, token) {
   }
 
   const phoneOrEmail =
-    tokenRow.student_phone || tokenRow.student_email || String(chatId);
+    normalizePhone(tokenRow.student_phone) || tokenRow.student_email || String(chatId);
   const isPaid = Boolean(tokenRow.payment_id);
 
   // 4. BUG 3 FIX: Find existing enrollment by EVERY identifier before inserting
