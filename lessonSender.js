@@ -65,7 +65,7 @@ function escMd(text) {
 // ── Main sendLesson ────────────────────────────────────────────────
 async function sendLesson(chatId) {
   // 1. Rate limit
-  const { limited, retryAfterSeconds } = checkRateLimit(chatId)
+  const { limited, retryAfterSeconds } = await checkRateLimit(chatId)
   if (limited) {
     const mins = Math.ceil(retryAfterSeconds / 60)
     await _sendMessage(

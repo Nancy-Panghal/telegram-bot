@@ -24,8 +24,7 @@ const MIME_TO_EXT = {
 
 let _supabase, _sendMessage, _config
 
-/** chatId -> pending submission context */
-const pendingSubmissions = new Map()
+
 
 function initAssignmentSender({ supabase, sendMessage, config }) {
   _supabase = supabase
@@ -185,6 +184,51 @@ async function sendAssignmentPrompt(chatId, lessonOrderNum) {
   )
 }
 
+async function getPendingSubmission(chatId) {
+  const { data: enrollment } = await _supabase
+    .from('enrollments')
+    .select('id, student_id')
+    .eq('telegram_chat_id', String(chatId))
+    .order('enrolled_at', { ascending: false })
+    .limit(1)
+
+  if (!enrollment || enrollment.length === 0) return null
+
+  const { data, error } = await _supabase
+    .from('pending_submissions')
+    .select('*')
+    .eq('student_id', enrollment[0].student_id)
+    .maybeSingle()
+
+  if (error || !data) return null
+
+  return {
+    lessonOrderNum: data.lesson_order_num,
+    lessonId: data.lesson_id,
+    courseId: data.course_id,
+    enrollmentId: data.enrollment_id,
+    creatorId: data.creator_id,
+    studentId: data.student_id,
+    id: data.id,
+  }
+}
+
+async function deletePendingSubmission(chatId) {
+  const { data: enrollment } = await _supabase
+    .from('enrollments')
+    .select('id, student_id')
+    .eq('telegram_chat_id', String(chatId))
+    .order('enrolled_at', { ascending: false })
+    .limit(1)
+
+  if (!enrollment || enrollment.length === 0) return
+
+  await _supabase
+    .from('pending_submissions')
+    .delete()
+    .eq('student_id', enrollment[0].student_id)
+}
+
 async function beginAssignmentSubmit(chatId, lessonOrderNum) {
   const enrollment = await getEnrollment(chatId)
   if (!enrollment) {
@@ -207,14 +251,26 @@ async function beginAssignmentSubmit(chatId, lessonOrderNum) {
     return
   }
 
-  pendingSubmissions.set(String(chatId), {
-    lessonOrderNum,
-    lessonId: lesson.id,
-    courseId: enrollment.course_uuid,
-    enrollmentId: enrollment.id,
-    creatorId: enrollment.creator_id,
-    studentId: enrollment.student_id,
-  })
+  // Upsert pending submission into the database
+  const { error: upsertError } = await _supabase
+    .from('pending_submissions')
+    .upsert({
+      lesson_order_num: lessonOrderNum,
+      lesson_id: lesson.id,
+      course_id: enrollment.course_uuid,
+      enrollment_id: enrollment.id,
+      creator_id: enrollment.creator_id,
+      student_id: enrollment.student_id,
+    }, {
+      onConflict: 'student_id, lesson_id'
+    })
+    .select()
+
+  if (upsertError) {
+    console.error('[beginAssignmentSubmit] error:', upsertError)
+    await _sendMessage(chatId, 'Something went wrong. Please try again later.')
+    return
+  }
 
   await _sendMessage(
     chatId,
@@ -293,11 +349,9 @@ async function downloadTelegramFile(fileId) {
 }
 
 async function finalizeSubmission(chatId, pending, { submissionText, submissionUrl }) {
-  const key = String(chatId)
-
   const existing = await hasSubmission(pending.enrollmentId, pending.lessonId)
   if (existing) {
-    pendingSubmissions.delete(key)
+    await deletePendingSubmission(chatId)
     await _sendMessage(chatId, 'You already submitted this assignment\\.')
     return
   }
@@ -318,7 +372,7 @@ async function finalizeSubmission(chatId, pending, { submissionText, submissionU
     return
   }
 
-  pendingSubmissions.delete(key)
+  await deletePendingSubmission(chatId)
 
   const lesson = await getLesson(pending.courseId, pending.lessonOrderNum)
   await notifyCreator(pending.creatorId, lesson || { title: '' }, pending.lessonOrderNum)
@@ -331,8 +385,7 @@ async function finalizeSubmission(chatId, pending, { submissionText, submissionU
 }
 
 async function submitAssignmentText(chatId, text) {
-  const key = String(chatId)
-  const pending = pendingSubmissions.get(key)
+  const pending = await getPendingSubmission(chatId)
   if (!pending) return false
 
   const trimmed = String(text || '').trim()
@@ -350,8 +403,7 @@ async function submitAssignmentText(chatId, text) {
 }
 
 async function submitAssignmentFile(chatId, message) {
-  const key = String(chatId)
-  const pending = pendingSubmissions.get(key)
+  const pending = await getPendingSubmission(chatId)
   if (!pending) return false
 
   let fileId = null
@@ -408,12 +460,13 @@ async function submitAssignmentFile(chatId, message) {
   return true
 }
 
-function cancelPending(chatId) {
-  pendingSubmissions.delete(String(chatId))
+async function cancelPending(chatId) {
+  await deletePendingSubmission(chatId)
 }
 
-function hasPendingSubmission(chatId) {
-  return pendingSubmissions.has(String(chatId))
+async function hasPendingSubmission(chatId) {
+  const pending = await getPendingSubmission(chatId)
+  return !!pending
 }
 
 module.exports = {

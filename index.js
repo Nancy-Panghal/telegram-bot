@@ -726,14 +726,14 @@ async function handleUpdate(update) {
         return markDone(chatId, enrollment?.current_lesson || 1);
       }
       if (text === "/cancel") {
-        if (hasPendingSubmission(chatId)) {
-          cancelPending(chatId);
+        if (await hasPendingSubmission(chatId)) {
+          await cancelPending(chatId);
           return sendMessage(chatId, "Assignment submission cancelled\\.");
         }
         return sendMessage(chatId, "Nothing to cancel\\.");
       }
 
-      if (hasPendingSubmission(chatId)) {
+      if (await hasPendingSubmission(chatId)) {
         if (update.message.document || (update.message.photo && update.message.photo.length)) {
           return submitAssignmentFile(chatId, update.message);
         }

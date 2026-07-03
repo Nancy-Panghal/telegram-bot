@@ -29,8 +29,7 @@ function initWatermark(supabase) {
   _supabase = supabase
 }
 
-// ── Rate limit store (in-memory; swap for Redis in production) ───────────────
-const rateLimitStore = new Map()
+// ── Rate limit using Supabase ───────────────────────────────────────────────
 const RATE_WINDOW_MS = 10 * 60 * 1000  // 10 minutes
 const RATE_MAX_LESSONS = 5             // max 5 lesson requests per 10 min
 
@@ -39,22 +38,38 @@ const RATE_MAX_LESSONS = 5             // max 5 lesson requests per 10 min
  * @param {string|number} chatId
  * @returns {{ limited: boolean, retryAfterSeconds: number }}
  */
-function checkRateLimit(chatId) {
+async function checkRateLimit(chatId) {
   const key = String(chatId)
-  const now = Date.now()
-  const entry = rateLimitStore.get(key) || { count: 0, windowStart: now, firstRequest: now }
+  const now = new Date()
+  const windowStart = new Date(now.getTime() - RATE_WINDOW_MS)
 
-  if (now - entry.windowStart > RATE_WINDOW_MS) {
-    // New window
-    rateLimitStore.set(key, { count: 1, windowStart: now, firstRequest: now })
+  // 1. Insert a new event
+  await _supabase.from('rate_limit_events').insert({
+    phone: key,
+    event_type: 'lesson_request',
+    created_at: now.toISOString(),
+  })
+
+  // 2. Count events in the current window
+  const { data: events, error: countError } = await _supabase
+    .from('rate_limit_events')
+    .select('created_at')
+    .eq('phone', key)
+    .eq('event_type', 'lesson_request')
+    .gte('created_at', windowStart.toISOString())
+
+  if (countError) {
+    console.error('[watermark] checkRateLimit count error:', countError)
     return { limited: false, retryAfterSeconds: 0 }
   }
 
-  entry.count += 1
-  rateLimitStore.set(key, entry)
+  const count = events?.length || 0
 
-  if (entry.count > RATE_MAX_LESSONS) {
-    const retryAfterMs = RATE_WINDOW_MS - (now - entry.windowStart)
+  if (count > RATE_MAX_LESSONS) {
+    // Find the earliest event in the window to calculate retry time
+    const earliestEvent = events.sort((a, b) => new Date(a.created_at) - new Date(b.created_at))[0]
+    const earliestTime = new Date(earliestEvent.created_at)
+    const retryAfterMs = RATE_WINDOW_MS - (now.getTime() - earliestTime.getTime())
     return {
       limited: true,
       retryAfterSeconds: Math.ceil(retryAfterMs / 1000),
