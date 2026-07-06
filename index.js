@@ -890,6 +890,31 @@ app.post("/webhook", async (req, res) => {
     return;
   }
 
+  const updateId = req.body?.update_id;
+  if (updateId !== undefined && updateId !== null) {
+    const { data: existing } = await supabase
+      .from("telegram_processed_updates")
+      .select("update_id")
+      .eq("update_id", updateId)
+      .maybeSingle();
+
+    if (existing) {
+      res.sendStatus(200);
+      return;
+    }
+
+    const { error: insertErr } = await supabase
+      .from("telegram_processed_updates")
+      .insert({ update_id: updateId });
+
+    // If insert failed because another request already claimed this update_id
+    // (race between two near-simultaneous retries), skip processing here too.
+    if (insertErr) {
+      res.sendStatus(200);
+      return;
+    }
+  }
+
   res.sendStatus(200);
   try {
     await handleUpdate(req.body);
