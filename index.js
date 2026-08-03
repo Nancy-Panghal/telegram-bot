@@ -91,14 +91,7 @@ function slugify(text) {
     .trim();
 }
 
-function maxFreeLessons(config) {
-  if (config === "lesson 1 free") return 1;
-  if (config === "2 lessons free") return 2;
-  if (config === "3 lessons free") return 3;
-  if (config === "module 1 free") return 3;
-  if (config === "2 modules free") return 6;
-  return 0;
-}
+
 
 async function firstRow(query) {
   const { data, error } = await query.limit(1);
@@ -113,13 +106,7 @@ function courseUrl(course) {
   return `${ACADEMYKIT_URL}/course/${slugify(course.host_name || "creator")}/${slugify(course.name || course.slug || "course")}/${course.id}`;
 }
 
-function lessonAllowed(enrollment, lessonNumber) {
-  if (enrollment.payment_status === "paid") return true;
-  return (
-    lessonNumber <=
-    maxFreeLessons(enrollment.courses?.free_preview_config || "nothing free")
-  );
-}
+
 
 function signResourceUrl(lessonId, type, identity) {
   const exp = Date.now() + 2 * 60 * 60 * 1000;
@@ -616,7 +603,7 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
   // Don't update current_lesson backwards — keep it as the highest reached
   const { data: lessons } = await supabase
     .from('lessons')
-    .select('id, title, order_num, quiz_questions')
+    .select('id, title, order_num, quiz_questions, is_free')
     .eq('course_id', enrollment.course_uuid)
     .eq('order_num', lessonOrderNum)
     .eq('is_published', true)
@@ -631,10 +618,8 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
   // Check access
   const isPaid = enrollment.payment_status === 'paid'
   if (!isPaid) {
-    const config = enrollment.courses?.free_preview_config || 'nothing free'
-    const maxFree = { 'lesson 1 free': 1, '2 lessons free': 2, '3 lessons free': 3, 'module 1 free': 3, '2 modules free': 6 }
-    const limit = maxFree[config] || 0
-    if (lessonOrderNum > limit) {
+    const isFree = enrollment.courses?.is_free_course === true || lesson.is_free === true
+    if (!isFree) {
       const course = enrollment.courses
       const courseUrl = `${ACADEMYKIT_URL}/about-course/${slugify(course?.host_name || 'creator')}/${slugify(course?.name || 'course')}/${enrollment.course_uuid}`
       await sendMessage(chatId, '🔒 This lesson is locked. Enroll to unlock the full course.', {
@@ -784,69 +769,86 @@ async function sendLiveReminders() {
   try {
     const now = new Date()
 
-    // 24h window: sessions scheduled between 23h55m and 24h05m from now
+    // 24h window: lessons scheduled between 23h55m and 24h05m from now
     const h24Start = new Date(now.getTime() + 23 * 60 * 60 * 1000 + 55 * 60 * 1000)
     const h24End   = new Date(now.getTime() + 24 * 60 * 60 * 1000 +  5 * 60 * 1000)
 
-    // 15min window: sessions scheduled between 10min and 20min from now
-    const m15Start = new Date(now.getTime() + 10 * 60 * 1000)
-    const m15End   = new Date(now.getTime() + 20 * 60 * 1000)
+    // 1h window: lessons scheduled between 55min and 65min from now
+    const h1Start = new Date(now.getTime() + 55 * 60 * 1000)
+    const h1End   = new Date(now.getTime() + 65 * 60 * 1000)
 
-    // Fetch sessions needing 24h reminder
-    const { data: sessions24h } = await supabase
-      .from('live_sessions')
-      .select('id, course_id, title, scheduled_at, duration_minutes, join_url')
-      .eq('reminder_24h_sent', false)
-      .gte('scheduled_at', h24Start.toISOString())
-      .lte('scheduled_at', h24End.toISOString())
+    // Fetch live-class lessons needing a 24h reminder
+    const { data: lessons24h } = await supabase
+      .from('lessons')
+      .select('id, course_id, order_num, title, live_scheduled_at, live_duration_minutes, content_url')
+      .eq('content_type', 'live')
+      .eq('is_published', true)
+      .is('live_reminder_24h_sent_at', null)
+      .gte('live_scheduled_at', h24Start.toISOString())
+      .lte('live_scheduled_at', h24End.toISOString())
 
-    // Fetch sessions needing 15min reminder
-    const { data: sessions15m } = await supabase
-      .from('live_sessions')
-      .select('id, course_id, title, scheduled_at, duration_minutes, join_url')
-      .eq('reminder_15m_sent', false)
-      .gte('scheduled_at', m15Start.toISOString())
-      .lte('scheduled_at', m15End.toISOString())
+    // Fetch live-class lessons needing a 1h reminder
+    const { data: lessons1h } = await supabase
+      .from('lessons')
+      .select('id, course_id, order_num, title, live_scheduled_at, live_duration_minutes, content_url')
+      .eq('content_type', 'live')
+      .eq('is_published', true)
+      .is('live_reminder_1h_sent_at', null)
+      .gte('live_scheduled_at', h1Start.toISOString())
+      .lte('live_scheduled_at', h1End.toISOString())
 
-    const allSessions = [
-      ...(sessions24h || []).map(s => ({ ...s, reminderType: '24h' })),
-      ...(sessions15m || []).map(s => ({ ...s, reminderType: '15m' })),
+    const allLessons = [
+      ...(lessons24h || []).map(l => ({ ...l, reminderType: '24h' })),
+      ...(lessons1h || []).map(l => ({ ...l, reminderType: '1h' })),
     ]
 
-    if (allSessions.length === 0) return
+    if (allLessons.length === 0) return
 
-    for (const session of allSessions) {
-      // Get all paid enrollments with telegram_chat_id for this course
+    for (const lesson of allLessons) {
+      const sentColumn = lesson.reminderType === '24h' ? 'live_reminder_24h_sent_at' : 'live_reminder_1h_sent_at'
+
+      // Only students who have actually reached this exact lesson in the
+      // sequence, and are paid, get considered at all.
       const { data: enrollments } = await supabase
         .from('enrollments')
-        .select('telegram_chat_id')
-        .eq('course_uuid', session.course_id)
+        .select('telegram_chat_id, phone')
+        .eq('course_uuid', lesson.course_id)
+        .eq('current_lesson', lesson.order_num)
         .eq('payment_status', 'paid')
         .not('telegram_chat_id', 'is', null)
 
       if (!enrollments || enrollments.length === 0) {
-        // Mark sent even if no students — prevents retrying empty courses
-        await supabase.from('live_sessions').update(
-          session.reminderType === '24h'
-            ? { reminder_24h_sent: true }
-            : { reminder_15m_sent: true }
-        ).eq('id', session.id)
+        await supabase.from('lessons').update({ [sentColumn]: new Date().toISOString() }).eq('id', lesson.id)
         continue
       }
 
-      const sessionTime = new Date(session.scheduled_at).toLocaleString('en-IN', {
+      // Of those, only students who opted into Telegram reminders.
+      const phones = enrollments.map(e => e.phone).filter(Boolean)
+      const { data: optedInStudents } = phones.length
+        ? await supabase.from('students').select('phone').in('phone', phones).eq('reminder_channel', 'telegram')
+        : { data: [] }
+
+      const optedInPhones = new Set((optedInStudents || []).map(s => s.phone))
+      const recipients = enrollments.filter(e => optedInPhones.has(e.phone))
+
+      if (recipients.length === 0) {
+        await supabase.from('lessons').update({ [sentColumn]: new Date().toISOString() }).eq('id', lesson.id)
+        continue
+      }
+
+      const sessionTime = new Date(lesson.live_scheduled_at).toLocaleString('en-IN', {
         day: 'numeric', month: 'short',
         hour: 'numeric', minute: '2-digit',
         timeZone: 'Asia/Kolkata',
       })
 
-      const message = session.reminderType === '24h'
-        ? `📅 *Live class tomorrow at ${escMd(sessionTime)} IST*\n\nTopic: *${escMd(session.title)}*\nDuration: ${session.duration_minutes} min\n\nJoin here: ${session.join_url}`
-        : `🔴 *Live class starts in 15 minutes\\!*\n\nTopic: *${escMd(session.title)}*\n\nJoin now: ${session.join_url}`
+      const message = lesson.reminderType === '24h'
+        ? `📅 *Live class tomorrow at ${escMd(sessionTime)} IST*\n\nTopic: *${escMd(lesson.title)}*\nDuration: ${lesson.live_duration_minutes || 60} min\n\nOpen your lesson on Telegram closer to the time to get the join link.`
+        : `🔴 *Live class starts in about 1 hour\\!*\n\nTopic: *${escMd(lesson.title)}*\n\nJoin now: ${lesson.content_url}`
 
       let delivered = 0
-      for (let i = 0; i < enrollments.length; i++) {
-        const chatId = enrollments[i].telegram_chat_id
+      for (let i = 0; i < recipients.length; i++) {
+        const chatId = recipients[i].telegram_chat_id
         try {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
@@ -861,17 +863,12 @@ async function sendLiveReminders() {
           console.warn(`[reminders] failed to send to ${chatId}:`, err.response?.data?.description || err.message)
         }
         // Rate limit: 20/sec
-        if (i < enrollments.length - 1) await new Promise(r => setTimeout(r, 50))
+        if (i < recipients.length - 1) await new Promise(r => setTimeout(r, 50))
       }
 
-      console.log(`[reminders] ${session.reminderType} for "${session.title}": ${delivered}/${enrollments.length} delivered`)
+      console.log(`[reminders] ${lesson.reminderType} for "${lesson.title}": ${delivered}/${recipients.length} delivered`)
 
-      // Mark reminder as sent
-      await supabase.from('live_sessions').update(
-        session.reminderType === '24h'
-          ? { reminder_24h_sent: true }
-          : { reminder_15m_sent: true }
-      ).eq('id', session.id)
+      await supabase.from('lessons').update({ [sentColumn]: new Date().toISOString() }).eq('id', lesson.id)
     }
   } catch (err) {
     console.error('[reminders] error:', err.message)
@@ -882,6 +879,7 @@ async function sendLiveReminders() {
 setInterval(sendLiveReminders, 5 * 60 * 1000)
 // Also run once on startup (after 10s so DB connection is ready)
 setTimeout(sendLiveReminders, 10 * 1000)
+
 
 app.post("/webhook", async (req, res) => {
   const secretHeader = req.header("x-telegram-bot-api-secret-token");
