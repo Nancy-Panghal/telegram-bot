@@ -2,7 +2,7 @@ if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
 }
 
-// Telegram bot for AcademyKit courses
+// Telegram bot for Kurso courses
 
 const express = require("express");
 const axios = require("axios");
@@ -223,7 +223,7 @@ async function handleStart(chatId, token) {
   // 2. Verify course still exists (FK protects this but double-check for clear error message)
   const { data: courseRows } = await supabase
     .from("courses")
-    .select("id, name")
+    .select("id, name, delivery")
     .eq("id", courseId)
     .limit(1);
 
@@ -289,6 +289,25 @@ async function handleStart(chatId, token) {
   const phoneOrEmail =
     normalizePhone(tokenRow.student_phone) || tokenRow.student_email || String(chatId);
   const isPaid = Boolean(tokenRow.payment_id);
+
+  // 3b. No-leakage: a PAID enrollment may only use Telegram if the course's
+  // (or, for an already-existing enrollment, that enrollment's own
+  // snapshotted) delivery method actually covers it. Free/preview tokens are
+  // unaffected — those are marketing previews, not the paid delivery channel.
+  if (isPaid) {
+    const courseDelivery = courseRows[0].delivery || "both";
+    if (courseDelivery !== "telegram" && courseDelivery !== "both") {
+      await sendMessage(
+        chatId,
+        "This course's lessons are not delivered via Telegram. Please use the delivery channel shown on your course page (WhatsApp or the web) to continue.",
+      );
+      await supabase
+        .from("telegram_tokens")
+        .update({ used: true, used_at: new Date().toISOString() })
+        .eq("id", tokenRow.id);
+      return;
+    }
+  }
 
   // 4. BUG 3 FIX: Find existing enrollment by EVERY identifier before inserting
   // Priority: student_id → phone → existing telegram enrollment for this course
@@ -923,7 +942,7 @@ app.post("/webhook", async (req, res) => {
 
 app.get("/", (req, res) => {
   res.json({
-    status: "AcademyKit Telegram bot running",
+    status: "Kurso Telegram bot running",
     time: new Date().toISOString(),
   });
 });
