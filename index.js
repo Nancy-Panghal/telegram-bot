@@ -28,6 +28,7 @@ app.use(express.json({ limit: "2mb" }));
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "";
+const INTERNAL_BOT_SECRET = process.env.INTERNAL_BOT_SECRET || "";
 const ACADEMYKIT_URL = (process.env.ACADEMYKIT_URL || "").replace(/\/$/, "");
 const LESSON_LINK_SECRET =
   process.env.LESSON_LINK_SECRET ||
@@ -898,6 +899,38 @@ async function sendLiveReminders() {
 setInterval(sendLiveReminders, 5 * 60 * 1000)
 // Also run once on startup (after 10s so DB connection is ready)
 setTimeout(sendLiveReminders, 10 * 1000)
+
+// Called by course-web's /api/cron/live-session-recording-notify (once
+// daily) — sends exactly one message per student per session: the
+// recording link if the creator uploaded one, or a "not available yet"
+// notice otherwise. Telegram has no message-template approval
+// requirement (unlike WhatsApp), so this sends free-form text directly.
+app.post("/internal/send-live-recording", async (req, res) => {
+  const auth = req.get("Authorization") || "";
+  if (!INTERNAL_BOT_SECRET || auth !== `Bearer ${INTERNAL_BOT_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { identity, sessionTitle, courseName, hasRecording, recordingLink } = req.body || {};
+  if (!identity || !sessionTitle || !courseName || typeof hasRecording !== "boolean") {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+  if (hasRecording && !recordingLink) {
+    return res.status(400).json({ error: "recordingLink required when hasRecording is true" });
+  }
+
+  const message = hasRecording
+    ? `🎬 *${escMd(sessionTitle)}* (${escMd(courseName)})\n\nYour recording is now available: ${recordingLink}`
+    : `⏳ *${escMd(sessionTitle)}* (${escMd(courseName)}) has ended.\n\nYour instructor hasn't uploaded a recording yet — we'll message you as soon as it's ready.`
+
+  try {
+    await sendMessage(identity, message);
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("[internal/send-live-recording] ❌ FAILED to", identity, "|", err.message);
+    return res.status(502).json({ error: "Telegram rejected the send" });
+  }
+});
 
 
 app.post("/webhook", async (req, res) => {
