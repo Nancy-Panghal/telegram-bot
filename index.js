@@ -23,6 +23,13 @@ const {
   hasPendingSubmission,
 } = require("./assignmentSender");
 
+const {
+  sendLesson,
+  createWebBootstrapUrl,
+  encodeFingerprint,
+  escMd,
+} = require('./lessonSender')
+
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -649,7 +656,11 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
     }
   }
  
-  const lessonUrl = signLessonPageUrl(enrollment.course_uuid, lesson.id, lesson.order_num, String(chatId))
+  const lessonUrl = await createWebBootstrapUrl({
+  course: enrollment.courses,
+  enrollment,
+  channel: 'telegram',
+})
   const fp = encodeFingerprint(String(chatId))
  
   // Detect if this is a review/watch-again scenario
