@@ -191,6 +191,50 @@ async function getEnrollment(chatId) {
   );
 }
 
+async function getAuthorizedEnrollment(chatId) {
+  const enrollment = await getEnrollment(chatId);
+
+  if (!enrollment || !enrollment.courses) {
+    return { enrollment: null, reason: "No active enrollment found." };
+  }
+
+  const deliveryMethod =
+    enrollment.delivery_method || enrollment.courses.delivery || "both";
+
+  if (deliveryMethod !== "telegram" && deliveryMethod !== "both") {
+    return {
+      enrollment: null,
+      reason: "This enrollment is not enabled for Telegram.",
+    };
+  }
+
+  const courseIsFree = enrollment.courses.is_free_course === true;
+  const isPaid = enrollment.payment_status === "paid";
+
+  if (!isPaid && !courseIsFree) {
+    return {
+      enrollment: null,
+      reason: "This enrollment is not active.",
+    };
+  }
+
+  return { enrollment, reason: null };
+}
+
+async function sendAuthorizedLesson(chatId) {
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId);
+
+  if (!enrollment) {
+    await sendMessage(
+      chatId,
+      reason || "Please open a valid course link first.",
+    );
+    return;
+  }
+
+  return sendLesson(chatId);
+}
+
 // Fixes BUG 3: bot creating second free enrollment alongside paid one
 // Fixes BUG 8: token marked used before enrollment confirmed
 // Rule: token is ONLY marked used AFTER enrollment is verified
@@ -471,11 +515,15 @@ async function handleStart(chatId, token) {
 // Fixes BUG 6: quiz tracked via API
 
 async function markDone(chatId, lessonNumber) {
-  const enrollment = await getEnrollment(chatId);
-  if (!enrollment || !enrollment.courses) {
-    await sendMessage(chatId, "No course connected yet.");
-    return;
-  }
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId)
+
+if (!enrollment) {
+  await sendMessage(
+    chatId,
+    reason || "Please open a valid course link first."
+  )
+  return
+}
 
   // Call the web API so both platforms write progress the same way
   try {
@@ -491,13 +539,24 @@ async function markDone(chatId, lessonNumber) {
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      console.error("[markDone] API error:", err);
-      // Fall through — still show buttons so student isn't stuck
-    }
+  const err = await res.json().catch(() => ({}))
+  console.error("[markDone] API error:", err)
+
+  await sendMessage(
+    chatId,
+    "Your progress could not be saved. Please try again."
+  )
+  return
+}
   } catch (err) {
-    console.error("[markDone] fetch error:", err.message);
-  }
+  console.error("[markDone] fetch error:", err.message)
+
+  await sendMessage(
+    chatId,
+    "Your progress could not be saved. Please try again."
+  )
+  return
+}
 
   // Fetch the lesson for its resource links + quiz + assignment
   const lesson = await firstRow(
@@ -590,11 +649,21 @@ async function markDone(chatId, lessonNumber) {
 }
 
 async function sendProgress(chatId) {
-  const enrollment = await getEnrollment(chatId);
-  if (!enrollment || !enrollment.courses) {
-    await sendMessage(chatId, "No course is connected yet.");
-    return;
-  }
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId)
+
+if (!enrollment) {
+  await sendMessage(
+  chatId,
+  "No active course connection was found. Open a valid course link first.",
+  {
+    inline_keyboard: [
+      [{ text: "▶ Start Lesson", callback_data: "lesson" }],
+      [{ text: "📊 My Progress", callback_data: "progress" }],
+    ],
+  },
+);
+return;
+}
 
   const completed = (enrollment.completed_lessons || []).length;
   const total = enrollment.courses.total_lessons || 0;
@@ -628,14 +697,15 @@ async function removeInlineKeyboard(chatId, messageId) {
 async function sendSpecificLesson(chatId, lessonOrderNum) {
   // Re-use sendLesson logic but for a specific lesson number
   // Update enrollment current_lesson to the requested number
-  const enrollment = await getEnrollment(chatId);
-  if (!enrollment) {
-    await sendMessage(
-      chatId,
-      "No course connected. Open the course page first.",
-    );
-    return;
-  }
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId)
+
+if (!enrollment) {
+  await sendMessage(
+    chatId,
+    reason || "Please open a valid course link first."
+  )
+  return
+}
 
   const currentLesson = enrollment.current_lesson || 1;
   if (lessonOrderNum > currentLesson) {
@@ -782,7 +852,9 @@ async function handleUpdate(update) {
         }
         return handleStart(chatId, token);
       }
-      if (text === "/lesson" || text === "/next") return sendLesson(chatId);
+      if (text === "/lesson" || text === "/next") {
+        return sendAuthorizedLesson(chatId);
+      }
       if (text === "/progress") return sendProgress(chatId);
       if (text === "/done") {
         const enrollment = await getEnrollment(chatId);
@@ -809,9 +881,15 @@ async function handleUpdate(update) {
       }
 
       return sendMessage(
-        chatId,
-        "Use /lesson to get your next lesson, or /progress to check your progress.",
-      );
+  chatId,
+  "Choose an option below:",
+  {
+    inline_keyboard: [
+      [{ text: "▶ Start Lesson", callback_data: "lesson" }],
+      [{ text: "📊 My Progress", callback_data: "progress" }],
+    ],
+  },
+);
     }
 
     if (update.callback_query) {
@@ -823,7 +901,9 @@ async function handleUpdate(update) {
       // Disable/remove buttons on the clicked message to prevent double-clicking or scrolling back to old CTAs
       await removeInlineKeyboard(chatId, messageId);
 
-      if (data === "lesson") return sendLesson(chatId);
+      if (data === "lesson") {
+        return sendAuthorizedLesson(chatId);
+      }
       if (data === "progress") return sendProgress(chatId);
       if (data.startsWith("done:"))
         return markDone(chatId, Number(data.replace("done:", "")));
