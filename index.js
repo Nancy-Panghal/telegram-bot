@@ -9,7 +9,6 @@ const axios = require("axios");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
-
 const { initWatermark } = require("./watermark");
 const { initQuizSender, sendQuiz } = require("./quizSender");
 const {
@@ -28,7 +27,7 @@ const {
   createWebBootstrapUrl,
   encodeFingerprint,
   escMd,
-} = require('./lessonSender')
+} = require("./lessonSender");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -45,7 +44,7 @@ const LESSON_LINK_SECRET =
 if (!LESSON_LINK_SECRET) {
   console.error(
     "[telegram-bot] No LESSON_LINK_SECRET / TELEGRAM_LINK_SECRET / WHATSAPP_LINK_SECRET set — " +
-    "every lesson and resource link this bot signs will fail verification on the website."
+      "every lesson and resource link this bot signs will fail verification on the website.",
   );
 }
 
@@ -58,7 +57,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,  // service role key — bypasses RLS for bot operations
+  process.env.SUPABASE_SERVICE_ROLE_KEY, // service role key — bypasses RLS for bot operations
 );
 
 // Initialize shared watermark and lessonSender modules with supabase
@@ -77,7 +76,8 @@ initLessonSender({
 initQuizSender({ supabase, config: { TELEGRAM_API } });
 initAssignmentSender({
   supabase,
-  sendMessage: async (chatId, text, keyboard) => sendMessage(chatId, text, keyboard),
+  sendMessage: async (chatId, text, keyboard) =>
+    sendMessage(chatId, text, keyboard),
   config: { TELEGRAM_API, BOT_TOKEN },
 });
 
@@ -99,8 +99,6 @@ function slugify(text) {
     .trim();
 }
 
-
-
 async function firstRow(query) {
   const { data, error } = await query.limit(1);
   if (error) {
@@ -113,8 +111,6 @@ async function firstRow(query) {
 function courseUrl(course) {
   return `${ACADEMYKIT_URL}/course/${slugify(course.host_name || "creator")}/${slugify(course.name || course.slug || "course")}/${course.id}`;
 }
-
-
 
 function signResourceUrl(lessonId, type, identity) {
   const exp = Date.now() + 2 * 60 * 60 * 1000;
@@ -295,27 +291,10 @@ async function handleStart(chatId, token) {
   }
 
   const phoneOrEmail =
-    normalizePhone(tokenRow.student_phone) || tokenRow.student_email || String(chatId);
+    normalizePhone(tokenRow.student_phone) ||
+    tokenRow.student_email ||
+    String(chatId);
   const isPaid = Boolean(tokenRow.payment_id);
-
-  // 3b. No-leakage: a PAID enrollment may only use Telegram if the course's
-  // (or, for an already-existing enrollment, that enrollment's own
-  // snapshotted) delivery method actually covers it. Free/preview tokens are
-  // unaffected — those are marketing previews, not the paid delivery channel.
-  if (isPaid) {
-    const courseDelivery = courseRows[0].delivery || "both";
-    if (courseDelivery !== "telegram" && courseDelivery !== "both") {
-      await sendMessage(
-        chatId,
-        "This course's lessons are not delivered via Telegram. Please use the delivery channel shown on your course page (WhatsApp or the web) to continue.",
-      );
-      await supabase
-        .from("telegram_tokens")
-        .update({ used: true, used_at: new Date().toISOString() })
-        .eq("id", tokenRow.id);
-      return;
-    }
-  }
 
   // 4. BUG 3 FIX: Find existing enrollment by EVERY identifier before inserting
   // Priority: student_id → phone → existing telegram enrollment for this course
@@ -325,7 +304,7 @@ async function handleStart(chatId, token) {
     const { data } = await supabase
       .from("enrollments")
       .select(
-        "id, payment_status, completed_lessons, current_lesson, quiz_results",
+        "id, student_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
       )
       .eq("course_uuid", courseId)
       .eq("student_id", student.id)
@@ -337,7 +316,7 @@ async function handleStart(chatId, token) {
     const { data } = await supabase
       .from("enrollments")
       .select(
-        "id, payment_status, completed_lessons, current_lesson, quiz_results",
+        "id, student_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
       )
       .eq("course_uuid", courseId)
       .eq("phone", phoneOrEmail)
@@ -349,12 +328,38 @@ async function handleStart(chatId, token) {
     const { data } = await supabase
       .from("enrollments")
       .select(
-        "id, payment_status, completed_lessons, current_lesson, quiz_results",
+        "id, student_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
       )
       .eq("course_uuid", courseId)
       .eq("telegram_chat_id", String(chatId))
       .limit(1);
     existingEnrollment = data?.[0] || null;
+  }
+  // IMPORTANT:
+  // Existing students use enrollment.delivery_method.
+  // course.delivery is only the default for new enrollments.
+  const effectiveDeliveryMethod =
+    existingEnrollment?.delivery_method || courseRows[0].delivery || "both";
+
+  if (
+    isPaid &&
+    effectiveDeliveryMethod !== "telegram" &&
+    effectiveDeliveryMethod !== "both"
+  ) {
+    await sendMessage(
+      chatId,
+      "This course's lessons are not delivered via Telegram. Please use the delivery channel shown on your course page (WhatsApp or the web) to continue.",
+    );
+
+    await supabase
+      .from("telegram_tokens")
+      .update({
+        used: true,
+        used_at: new Date().toISOString(),
+      })
+      .eq("id", tokenRow.id);
+
+    return;
   }
 
   const now = new Date().toISOString();
@@ -381,6 +386,10 @@ async function handleStart(chatId, token) {
         payment_status: newPaymentStatus,
         payment_id:
           tokenRow.payment_id || existingEnrollment.payment_id || null,
+        delivery_method:
+          existingEnrollment.delivery_method ||
+          courseRows[0].delivery ||
+          "both",
         last_telegram_sync: now,
         last_accessed: now,
       })
@@ -406,6 +415,7 @@ async function handleStart(chatId, token) {
         amount_paid: 0,
         last_telegram_sync: now,
         last_accessed: now,
+        delivery_method: courseRows[0].delivery || "both",
       })
       .select("id")
       .single();
@@ -434,16 +444,21 @@ async function handleStart(chatId, token) {
     .eq("id", tokenRow.id);
 
   await sendMessage(
-  chatId,
-  `✅ You're connected\\! Tap below to start learning\\.\n\n📚 You can also view all your enrolled courses at any time:`,
-  {
-    inline_keyboard: [
-      [{ text: "▶ Start Lesson", callback_data: "lesson" }],
-      [{ text: "📊 My Progress", callback_data: "progress" }],
-      [{ text: "📚 My Courses Dashboard", url: `${ACADEMYKIT_URL}/my-courses` }],
-    ],
-  },
-);
+    chatId,
+    `✅ You're connected\\! Tap below to start learning\\.\n\n📚 You can also view all your enrolled courses at any time:`,
+    {
+      inline_keyboard: [
+        [{ text: "▶ Start Lesson", callback_data: "lesson" }],
+        [{ text: "📊 My Progress", callback_data: "progress" }],
+        [
+          {
+            text: "📚 My Courses Dashboard",
+            url: `${ACADEMYKIT_URL}/my-courses`,
+          },
+        ],
+      ],
+    },
+  );
 }
 
 // Fixes BUG 5: uses /api/lesson/complete so progress is stored identically
@@ -484,21 +499,23 @@ async function markDone(chatId, lessonNumber) {
   const lesson = await firstRow(
     supabase
       .from("lessons")
-      .select("id, summary_url, notes_url, quiz_questions, assignment_prompt, assignment_required")
+      .select(
+        "id, summary_url, notes_url, quiz_questions, assignment_prompt, assignment_required",
+      )
       .eq("course_id", enrollment.course_uuid)
       .eq("order_num", lessonNumber)
       .eq("is_published", true),
   );
 
-  let assignmentBlocksNext = false
+  let assignmentBlocksNext = false;
   if (lesson?.assignment_required && lesson?.assignment_prompt) {
     const { data: existingAssignment } = await supabase
       .from("assignments")
       .select("id")
       .eq("enrollment_id", enrollment.id)
       .eq("lesson_id", lesson.id)
-      .maybeSingle()
-    assignmentBlocksNext = !existingAssignment
+      .maybeSingle();
+    assignmentBlocksNext = !existingAssignment;
   }
 
   // Fetch prev/next lesson order numbers to enable navigation
@@ -578,7 +595,7 @@ async function sendProgress(chatId) {
   const completed = (enrollment.completed_lessons || []).length;
   const total = enrollment.courses.total_lessons || 0;
   const percent =
-  total > 0 ? Math.min(Math.round((completed / total) * 100), 100) : 0;
+    total > 0 ? Math.min(Math.round((completed / total) * 100), 100) : 0;
   await sendMessage(
     chatId,
     `Progress: ${completed}/${total} lessons complete (${percent}%).\nCurrent lesson: ${enrollment.current_lesson || 1}`,
@@ -590,11 +607,15 @@ async function sendProgress(chatId) {
 
 async function removeInlineKeyboard(chatId, messageId) {
   try {
-    await axios.post(`${TELEGRAM_API}/editMessageReplyMarkup`, {
-      chat_id: chatId,
-      message_id: messageId,
-      reply_markup: { inline_keyboard: [] }
-    }, { timeout: 5000 });
+    await axios.post(
+      `${TELEGRAM_API}/editMessageReplyMarkup`,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [] },
+      },
+      { timeout: 5000 },
+    );
   } catch (err) {
     console.error("[removeInlineKeyboard] failed:", err.message);
   }
@@ -603,119 +624,141 @@ async function removeInlineKeyboard(chatId, messageId) {
 async function sendSpecificLesson(chatId, lessonOrderNum) {
   // Re-use sendLesson logic but for a specific lesson number
   // Update enrollment current_lesson to the requested number
-  const enrollment = await getEnrollment(chatId)
+  const enrollment = await getEnrollment(chatId);
   if (!enrollment) {
-    await sendMessage(chatId, 'No course connected. Open the course page first.')
-    return
+    await sendMessage(
+      chatId,
+      "No course connected. Open the course page first.",
+    );
+    return;
   }
 
-  const currentLesson = enrollment.current_lesson || 1
+  const currentLesson = enrollment.current_lesson || 1;
   if (lessonOrderNum > currentLesson) {
-    const assignmentBlock = await getRequiredAssignmentBlock(enrollment, lessonOrderNum)
+    const assignmentBlock = await getRequiredAssignmentBlock(
+      enrollment,
+      lessonOrderNum,
+    );
     if (assignmentBlock) {
       await sendMessage(
         chatId,
         `🔒 *Assignment required*\n\nComplete the assignment for Lesson ${assignmentBlock.prevLessonNum} before continuing.`,
         {
           inline_keyboard: [
-            [{ text: '📝 Submit Assignment', callback_data: `assign:${assignmentBlock.prevLessonNum}` }],
+            [
+              {
+                text: "📝 Submit Assignment",
+                callback_data: `assign:${assignmentBlock.prevLessonNum}`,
+              },
+            ],
           ],
         },
-      )
-      return
+      );
+      return;
     }
   }
- 
+
   // Allow going to previous lessons (lifetime access)
   // Don't update current_lesson backwards — keep it as the highest reached
   const { data: lessons } = await supabase
-    .from('lessons')
-    .select('id, title, order_num, quiz_questions, is_free')
-    .eq('course_id', enrollment.course_uuid)
-    .eq('order_num', lessonOrderNum)
-    .eq('is_published', true)
-    .limit(1)
- 
-  const lesson = lessons?.[0]
+    .from("lessons")
+    .select("id, title, order_num, quiz_questions, is_free")
+    .eq("course_id", enrollment.course_uuid)
+    .eq("order_num", lessonOrderNum)
+    .eq("is_published", true)
+    .limit(1);
+
+  const lesson = lessons?.[0];
   if (!lesson) {
-    await sendMessage(chatId, `Lesson ${lessonOrderNum} is not available yet.`)
-    return
+    await sendMessage(chatId, `Lesson ${lessonOrderNum} is not available yet.`);
+    return;
   }
- 
+
   // Check access
-  const isPaid = enrollment.payment_status === 'paid'
+  const isPaid = enrollment.payment_status === "paid";
   if (!isPaid) {
-    const isFree = enrollment.courses?.is_free_course === true || lesson.is_free === true
+    const isFree =
+      enrollment.courses?.is_free_course === true || lesson.is_free === true;
     if (!isFree) {
-      const course = enrollment.courses
-      const courseUrl = `${ACADEMYKIT_URL}/about-course/${slugify(course?.host_name || 'creator')}/${slugify(course?.name || 'course')}/${enrollment.course_uuid}`
-      await sendMessage(chatId, '🔒 This lesson is locked. Enroll to unlock the full course.', {
-        inline_keyboard: [[{ text: 'Pay and unlock course', url: courseUrl }]],
-      })
-      return
+      const course = enrollment.courses;
+      const courseUrl = `${ACADEMYKIT_URL}/about-course/${slugify(course?.host_name || "creator")}/${slugify(course?.name || "course")}/${enrollment.course_uuid}`;
+      await sendMessage(
+        chatId,
+        "🔒 This lesson is locked. Enroll to unlock the full course.",
+        {
+          inline_keyboard: [
+            [{ text: "Pay and unlock course", url: courseUrl }],
+          ],
+        },
+      );
+      return;
     }
   }
- 
+
   const lessonUrl = await createWebBootstrapUrl({
-  course: enrollment.courses,
-  enrollment,
-  channel: 'telegram',
-})
-  const fp = encodeFingerprint(String(chatId))
- 
+    course: enrollment.courses,
+    enrollment,
+    channel: "telegram",
+  });
+  const fp = encodeFingerprint(String(chatId));
+
   // Detect if this is a review/watch-again scenario
-  const isWatchAgain = lesson.order_num < (enrollment.current_lesson || 1)
+  const isWatchAgain = lesson.order_num < (enrollment.current_lesson || 1);
   const headerText = isWatchAgain
     ? `🔄 *Watching Again: Lesson ${lesson.order_num}: ${escMd(lesson.title)}*`
-    : `📖 *Lesson ${lesson.order_num}: ${escMd(lesson.title)}*`
+    : `📖 *Lesson ${lesson.order_num}: ${escMd(lesson.title)}*`;
 
   const keyboard = [
-    [{ text: '▶ Open Lesson', url: lessonUrl }],
+    [{ text: "▶ Open Lesson", url: lessonUrl }],
     [
-      { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
-      { text: '📊 Progress', callback_data: 'progress' },
+      { text: "✅ Mark Done", callback_data: `done:${lesson.order_num}` },
+      { text: "📊 Progress", callback_data: "progress" },
     ],
-  ]
+  ];
 
-  const navRow = []
+  const navRow = [];
   if (lesson.order_num > 1) {
     navRow.push({
       text: `⬅ Lesson ${lesson.order_num - 1}`,
       callback_data: `goto:${lesson.order_num - 1}`,
-    })
+    });
   }
 
   // Check if next published lesson exists
   const { data: nextLessons } = await supabase
-    .from('lessons')
-    .select('order_num')
-    .eq('course_id', enrollment.course_uuid)
-    .eq('order_num', lesson.order_num + 1)
-    .eq('is_published', true)
-    .limit(1)
+    .from("lessons")
+    .select("order_num")
+    .eq("course_id", enrollment.course_uuid)
+    .eq("order_num", lesson.order_num + 1)
+    .eq("is_published", true)
+    .limit(1);
 
   if (nextLessons && nextLessons.length > 0) {
     navRow.push({
       text: `Lesson ${lesson.order_num + 1} ➡`,
       callback_data: `goto:${lesson.order_num + 1}`,
-    })
+    });
   }
 
   if (navRow.length > 0) {
-    keyboard.push(navRow)
+    keyboard.push(navRow);
   }
 
   await sendMessage(
     chatId,
     `${headerText}\n\nTap *Open Lesson* below. Access expires in 2 hours.\n\n🔒 _This link is personal. Do not share it._\n${fp}`,
-    { inline_keyboard: keyboard }
-  )
- 
+    { inline_keyboard: keyboard },
+  );
+
   await supabase
-    .from('enrollments')
-    .update({ last_accessed: new Date().toISOString(), last_telegram_sync: new Date().toISOString() })
-    .eq('id', enrollment.id)
-    .then(() => {}).catch(() => {})
+    .from("enrollments")
+    .update({
+      last_accessed: new Date().toISOString(),
+      last_telegram_sync: new Date().toISOString(),
+    })
+    .eq("id", enrollment.id)
+    .then(() => {})
+    .catch(() => {});
 }
 
 // ── Replace handleUpdate in index.js with this ──────────────────
@@ -750,7 +793,10 @@ async function handleUpdate(update) {
       }
 
       if (await hasPendingSubmission(chatId)) {
-        if (update.message.document || (update.message.photo && update.message.photo.length)) {
+        if (
+          update.message.document ||
+          (update.message.photo && update.message.photo.length)
+        ) {
           return submitAssignmentFile(chatId, update.message);
         }
         if (text && !text.startsWith("/")) {
@@ -780,7 +826,10 @@ async function handleUpdate(update) {
       if (data.startsWith("quiz:"))
         return sendQuiz(chatId, Number(data.replace("quiz:", "")));
       if (data.startsWith("assign:"))
-        return beginAssignmentSubmit(chatId, Number(data.replace("assign:", "")));
+        return beginAssignmentSubmit(
+          chatId,
+          Number(data.replace("assign:", "")),
+        );
       // Previous/specific lesson navigation
       if (data.startsWith("goto:")) {
         const targetNum = Number(data.replace("goto:", ""));
@@ -798,118 +847,160 @@ async function handleUpdate(update) {
 
 async function sendLiveReminders() {
   try {
-    const now = new Date()
+    const now = new Date();
 
     // 24h window: lessons scheduled between 23h55m and 24h05m from now
-    const h24Start = new Date(now.getTime() + 23 * 60 * 60 * 1000 + 55 * 60 * 1000)
-    const h24End   = new Date(now.getTime() + 24 * 60 * 60 * 1000 +  5 * 60 * 1000)
+    const h24Start = new Date(
+      now.getTime() + 23 * 60 * 60 * 1000 + 55 * 60 * 1000,
+    );
+    const h24End = new Date(
+      now.getTime() + 24 * 60 * 60 * 1000 + 5 * 60 * 1000,
+    );
 
     // 1h window: lessons scheduled between 55min and 65min from now
-    const h1Start = new Date(now.getTime() + 55 * 60 * 1000)
-    const h1End   = new Date(now.getTime() + 65 * 60 * 1000)
+    const h1Start = new Date(now.getTime() + 55 * 60 * 1000);
+    const h1End = new Date(now.getTime() + 65 * 60 * 1000);
 
     // Fetch live-class lessons needing a 24h reminder
     const { data: lessons24h } = await supabase
-      .from('lessons')
-      .select('id, course_id, order_num, title, live_scheduled_at, live_duration_minutes, content_url')
-      .eq('content_type', 'live')
-      .eq('is_published', true)
-      .is('live_reminder_24h_sent_at', null)
-      .gte('live_scheduled_at', h24Start.toISOString())
-      .lte('live_scheduled_at', h24End.toISOString())
+      .from("lessons")
+      .select(
+        "id, course_id, order_num, title, live_scheduled_at, live_duration_minutes, content_url",
+      )
+      .eq("content_type", "live")
+      .eq("is_published", true)
+      .is("live_reminder_24h_sent_at", null)
+      .gte("live_scheduled_at", h24Start.toISOString())
+      .lte("live_scheduled_at", h24End.toISOString());
 
     // Fetch live-class lessons needing a 1h reminder
     const { data: lessons1h } = await supabase
-      .from('lessons')
-      .select('id, course_id, order_num, title, live_scheduled_at, live_duration_minutes, content_url')
-      .eq('content_type', 'live')
-      .eq('is_published', true)
-      .is('live_reminder_1h_sent_at', null)
-      .gte('live_scheduled_at', h1Start.toISOString())
-      .lte('live_scheduled_at', h1End.toISOString())
+      .from("lessons")
+      .select(
+        "id, course_id, order_num, title, live_scheduled_at, live_duration_minutes, content_url",
+      )
+      .eq("content_type", "live")
+      .eq("is_published", true)
+      .is("live_reminder_1h_sent_at", null)
+      .gte("live_scheduled_at", h1Start.toISOString())
+      .lte("live_scheduled_at", h1End.toISOString());
 
     const allLessons = [
-      ...(lessons24h || []).map(l => ({ ...l, reminderType: '24h' })),
-      ...(lessons1h || []).map(l => ({ ...l, reminderType: '1h' })),
-    ]
+      ...(lessons24h || []).map((l) => ({ ...l, reminderType: "24h" })),
+      ...(lessons1h || []).map((l) => ({ ...l, reminderType: "1h" })),
+    ];
 
-    if (allLessons.length === 0) return
+    if (allLessons.length === 0) return;
 
     for (const lesson of allLessons) {
-      const sentColumn = lesson.reminderType === '24h' ? 'live_reminder_24h_sent_at' : 'live_reminder_1h_sent_at'
+      const sentColumn =
+        lesson.reminderType === "24h"
+          ? "live_reminder_24h_sent_at"
+          : "live_reminder_1h_sent_at";
 
       // Only students who have actually reached this exact lesson in the
       // sequence, and are paid, get considered at all.
       const { data: enrollments } = await supabase
-        .from('enrollments')
-        .select('telegram_chat_id, phone')
-        .eq('course_uuid', lesson.course_id)
-        .eq('current_lesson', lesson.order_num)
-        .eq('payment_status', 'paid')
-        .not('telegram_chat_id', 'is', null)
+        .from("enrollments")
+        .select("telegram_chat_id, phone")
+        .eq("course_uuid", lesson.course_id)
+        .eq("current_lesson", lesson.order_num)
+        .eq("payment_status", "paid")
+        .not("telegram_chat_id", "is", null);
 
       if (!enrollments || enrollments.length === 0) {
-        await supabase.from('lessons').update({ [sentColumn]: new Date().toISOString() }).eq('id', lesson.id)
-        continue
+        await supabase
+          .from("lessons")
+          .update({ [sentColumn]: new Date().toISOString() })
+          .eq("id", lesson.id);
+        continue;
       }
 
       // Of those, only students who opted into Telegram reminders.
-      const phones = enrollments.map(e => e.phone).filter(Boolean)
+      const phones = enrollments.map((e) => e.phone).filter(Boolean);
       const { data: optedInStudents } = phones.length
-        ? await supabase.from('students').select('phone').in('phone', phones).eq('reminder_channel', 'telegram')
-        : { data: [] }
+        ? await supabase
+            .from("students")
+            .select("phone")
+            .in("phone", phones)
+            .eq("reminder_channel", "telegram")
+        : { data: [] };
 
-      const optedInPhones = new Set((optedInStudents || []).map(s => s.phone))
-      const recipients = enrollments.filter(e => optedInPhones.has(e.phone))
+      const optedInPhones = new Set(
+        (optedInStudents || []).map((s) => s.phone),
+      );
+      const recipients = enrollments.filter((e) => optedInPhones.has(e.phone));
 
       if (recipients.length === 0) {
-        await supabase.from('lessons').update({ [sentColumn]: new Date().toISOString() }).eq('id', lesson.id)
-        continue
+        await supabase
+          .from("lessons")
+          .update({ [sentColumn]: new Date().toISOString() })
+          .eq("id", lesson.id);
+        continue;
       }
 
-      const sessionTime = new Date(lesson.live_scheduled_at).toLocaleString('en-IN', {
-        day: 'numeric', month: 'short',
-        hour: 'numeric', minute: '2-digit',
-        timeZone: 'Asia/Kolkata',
-      })
+      const sessionTime = new Date(lesson.live_scheduled_at).toLocaleString(
+        "en-IN",
+        {
+          day: "numeric",
+          month: "short",
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone: "Asia/Kolkata",
+        },
+      );
 
-      const message = lesson.reminderType === '24h'
-        ? `📅 *Live class tomorrow at ${escMd(sessionTime)} IST*\n\nTopic: *${escMd(lesson.title)}*\nDuration: ${lesson.live_duration_minutes || 60} min\n\nOpen your lesson on Telegram closer to the time to get the join link.`
-        : `🔴 *Live class starts in about 1 hour\\!*\n\nTopic: *${escMd(lesson.title)}*\n\nJoin now: ${lesson.content_url}`
+      const message =
+        lesson.reminderType === "24h"
+          ? `📅 *Live class tomorrow at ${escMd(sessionTime)} IST*\n\nTopic: *${escMd(lesson.title)}*\nDuration: ${lesson.live_duration_minutes || 60} min\n\nOpen your lesson on Telegram closer to the time to get the join link.`
+          : `🔴 *Live class starts in about 1 hour\\!*\n\nTopic: *${escMd(lesson.title)}*\n\nJoin now: ${lesson.content_url}`;
 
-      let delivered = 0
+      let delivered = 0;
       for (let i = 0; i < recipients.length; i++) {
-        const chatId = recipients[i].telegram_chat_id
+        const chatId = recipients[i].telegram_chat_id;
         try {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: message,
-            parse_mode: 'Markdown',
-            protect_content: true,
-            disable_web_page_preview: false,
-          }, { timeout: 10000 })
-          delivered++
+          await axios.post(
+            `${TELEGRAM_API}/sendMessage`,
+            {
+              chat_id: chatId,
+              text: message,
+              parse_mode: "Markdown",
+              protect_content: true,
+              disable_web_page_preview: false,
+            },
+            { timeout: 10000 },
+          );
+          delivered++;
         } catch (err) {
           // 403 = student blocked bot — expected, non-fatal
-          console.warn(`[reminders] failed to send to ${chatId}:`, err.response?.data?.description || err.message)
+          console.warn(
+            `[reminders] failed to send to ${chatId}:`,
+            err.response?.data?.description || err.message,
+          );
         }
         // Rate limit: 20/sec
-        if (i < recipients.length - 1) await new Promise(r => setTimeout(r, 50))
+        if (i < recipients.length - 1)
+          await new Promise((r) => setTimeout(r, 50));
       }
 
-      console.log(`[reminders] ${lesson.reminderType} for "${lesson.title}": ${delivered}/${recipients.length} delivered`)
+      console.log(
+        `[reminders] ${lesson.reminderType} for "${lesson.title}": ${delivered}/${recipients.length} delivered`,
+      );
 
-      await supabase.from('lessons').update({ [sentColumn]: new Date().toISOString() }).eq('id', lesson.id)
+      await supabase
+        .from("lessons")
+        .update({ [sentColumn]: new Date().toISOString() })
+        .eq("id", lesson.id);
     }
   } catch (err) {
-    console.error('[reminders] error:', err.message)
+    console.error("[reminders] error:", err.message);
   }
 }
 
 // Run every 5 minutes
-setInterval(sendLiveReminders, 5 * 60 * 1000)
+setInterval(sendLiveReminders, 5 * 60 * 1000);
 // Also run once on startup (after 10s so DB connection is ready)
-setTimeout(sendLiveReminders, 10 * 1000)
+setTimeout(sendLiveReminders, 10 * 1000);
 
 // Called by course-web's /api/cron/live-session-recording-notify (once
 // daily) — sends exactly one message per student per session: the
@@ -922,27 +1013,39 @@ app.post("/internal/send-live-recording", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { identity, sessionTitle, courseName, hasRecording, recordingLink } = req.body || {};
-  if (!identity || !sessionTitle || !courseName || typeof hasRecording !== "boolean") {
+  const { identity, sessionTitle, courseName, hasRecording, recordingLink } =
+    req.body || {};
+  if (
+    !identity ||
+    !sessionTitle ||
+    !courseName ||
+    typeof hasRecording !== "boolean"
+  ) {
     return res.status(400).json({ error: "Missing required fields" });
   }
   if (hasRecording && !recordingLink) {
-    return res.status(400).json({ error: "recordingLink required when hasRecording is true" });
+    return res
+      .status(400)
+      .json({ error: "recordingLink required when hasRecording is true" });
   }
 
   const message = hasRecording
     ? `🎬 *${escMd(sessionTitle)}* (${escMd(courseName)})\n\nYour recording is now available: ${recordingLink}`
-    : `⏳ *${escMd(sessionTitle)}* (${escMd(courseName)}) has ended.\n\nYour instructor hasn't uploaded a recording yet — we'll message you as soon as it's ready.`
+    : `⏳ *${escMd(sessionTitle)}* (${escMd(courseName)}) has ended.\n\nYour instructor hasn't uploaded a recording yet — we'll message you as soon as it's ready.`;
 
   try {
     await sendMessage(identity, message);
     return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error("[internal/send-live-recording] ❌ FAILED to", identity, "|", err.message);
+    console.error(
+      "[internal/send-live-recording] ❌ FAILED to",
+      identity,
+      "|",
+      err.message,
+    );
     return res.status(502).json({ error: "Telegram rejected the send" });
   }
 });
-
 
 app.post("/webhook", async (req, res) => {
   const secretHeader = req.header("x-telegram-bot-api-secret-token");
