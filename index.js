@@ -304,7 +304,7 @@ async function handleStart(chatId, token) {
     const { data } = await supabase
       .from("enrollments")
       .select(
-        "id, student_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
+        "id, student_id, payment_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
       )
       .eq("course_uuid", courseId)
       .eq("student_id", student.id)
@@ -316,7 +316,7 @@ async function handleStart(chatId, token) {
     const { data } = await supabase
       .from("enrollments")
       .select(
-        "id, student_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
+        "id, student_id, payment_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
       )
       .eq("course_uuid", courseId)
       .eq("phone", phoneOrEmail)
@@ -328,7 +328,7 @@ async function handleStart(chatId, token) {
     const { data } = await supabase
       .from("enrollments")
       .select(
-        "id, student_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
+        "id, student_id, payment_id, payment_status, delivery_method, completed_lessons, current_lesson, quiz_results",
       )
       .eq("course_uuid", courseId)
       .eq("telegram_chat_id", String(chatId))
@@ -364,6 +364,11 @@ async function handleStart(chatId, token) {
 
   const now = new Date().toISOString();
 
+  const safeTokenPaymentId =
+    tokenRow.payment_id === "TEST"
+      ? `TEST:${courseRows[0].id}:${tokenRow.id}`
+      : tokenRow.payment_id || null;
+
   // 5. Update or create enrollment — never downgrade payment_status from paid to free
   let enrollmentId = null;
   let enrollError = null;
@@ -384,8 +389,7 @@ async function handleStart(chatId, token) {
         student_id: student?.id || existingEnrollment.student_id || null,
         phone: phoneOrEmail,
         payment_status: newPaymentStatus,
-        payment_id:
-          tokenRow.payment_id || existingEnrollment.payment_id || null,
+        payment_id: existingEnrollment.payment_id || safeTokenPaymentId,
         delivery_method:
           existingEnrollment.delivery_method ||
           courseRows[0].delivery ||
@@ -408,7 +412,7 @@ async function handleStart(chatId, token) {
         student_id: student?.id || null,
         telegram_chat_id: String(chatId),
         current_lesson: 1,
-        payment_id: tokenRow.payment_id || null,
+        payment_id: safeTokenPaymentId,
         payment_status: isPaid ? "paid" : "free",
         completed_lessons: [],
         quiz_results: [],
