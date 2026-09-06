@@ -28,6 +28,7 @@ const {
   encodeFingerprint,
   escMd,
 } = require("./lessonSender");
+const { getAvailabilityMessage, getNoteMessage } = require("./lessonMessages");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -742,9 +743,17 @@ if (!enrollment) {
     .eq("is_published", true)
     .limit(1);
 
-  const lesson = lessons?.[0];
+    const lesson = lessons?.[0];
   if (!lesson) {
-    await sendMessage(chatId, `Lesson ${lessonOrderNum} is not available yet.`);
+    const customAvailabilityMessage = await getAvailabilityMessage(
+      supabase,
+      enrollment.course_uuid,
+      lessonOrderNum,
+    );
+    await sendMessage(
+      chatId,
+      customAvailabilityMessage || `Lesson ${lessonOrderNum} is not available yet.`,
+    );
     return;
   }
 
@@ -767,6 +776,11 @@ if (!enrollment) {
       );
       return;
     }
+  }
+
+    const noteMessage = await getNoteMessage(supabase, lesson.id);
+  if (noteMessage) {
+    await sendMessage(chatId, noteMessage);
   }
 
   const lessonUrl = await createWebBootstrapUrl({
@@ -868,7 +882,7 @@ async function handleUpdate(update) {
         return sendMessage(chatId, "Nothing to cancel\\.");
       }
 
-      if (await hasPendingSubmission(chatId)) {
+            if (await hasPendingSubmission(chatId)) {
         if (
           update.message.document ||
           (update.message.photo && update.message.photo.length)
@@ -878,6 +892,24 @@ async function handleUpdate(update) {
         if (text && !text.startsWith("/")) {
           return submitAssignmentText(chatId, text);
         }
+      }
+
+      // Fix: a pasted (not tapped) start link never triggers Telegram's
+      // real /start flow — it arrives here as plain text. Previously this
+      // fell straight to the generic menu below regardless of whether the
+      // token in the pasted text was valid, truncated, or garbage, which
+      // looked like "it worked" even for a broken link. Now we extract the
+      // token from pasted text and run it through the SAME exact-match
+      // handleStart() check a real /start uses, so a bad token is rejected
+      // here too instead of silently showing the menu.
+      const pastedStartMatch = text.match(/[?&]start=([^&\s]+)/);
+      if (pastedStartMatch) {
+        const token = decodeURIComponent(pastedStartMatch[1]);
+        if (token.startsWith("done_")) {
+          const lessonNumber = Number(token.replace("done_", ""));
+          return markDone(chatId, lessonNumber);
+        }
+        return handleStart(chatId, token);
       }
 
       return sendMessage(
