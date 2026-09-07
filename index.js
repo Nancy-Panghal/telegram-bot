@@ -516,15 +516,15 @@ async function handleStart(chatId, token) {
 // Fixes BUG 6: quiz tracked via API
 
 async function markDone(chatId, lessonNumber) {
-  const { enrollment, reason } = await getAuthorizedEnrollment(chatId)
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId);
 
-if (!enrollment) {
-  await sendMessage(
-    chatId,
-    reason || "Please open a valid course link first."
-  )
-  return
-}
+  if (!enrollment) {
+    await sendMessage(
+      chatId,
+      reason || "Please open a valid course link first.",
+    );
+    return;
+  }
 
   // Call the web API so both platforms write progress the same way
   try {
@@ -540,24 +540,24 @@ if (!enrollment) {
     });
 
     if (!res.ok) {
-  const err = await res.json().catch(() => ({}))
-  console.error("[markDone] API error:", err)
+      const err = await res.json().catch(() => ({}));
+      console.error("[markDone] API error:", err);
 
-  await sendMessage(
-    chatId,
-    "Your progress could not be saved. Please try again."
-  )
-  return
-}
+      await sendMessage(
+        chatId,
+        "Your progress could not be saved. Please try again.",
+      );
+      return;
+    }
   } catch (err) {
-  console.error("[markDone] fetch error:", err.message)
+    console.error("[markDone] fetch error:", err.message);
 
-  await sendMessage(
-    chatId,
-    "Your progress could not be saved. Please try again."
-  )
-  return
-}
+    await sendMessage(
+      chatId,
+      "Your progress could not be saved. Please try again.",
+    );
+    return;
+  }
 
   // Fetch the lesson for its resource links + quiz + assignment
   const lesson = await firstRow(
@@ -650,21 +650,21 @@ if (!enrollment) {
 }
 
 async function sendProgress(chatId) {
-  const { enrollment, reason } = await getAuthorizedEnrollment(chatId)
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId);
 
-if (!enrollment) {
-  await sendMessage(
-  chatId,
-  "No active course connection was found. Open a valid course link first.",
-  {
-    inline_keyboard: [
-      [{ text: "▶ Start Lesson", callback_data: "lesson" }],
-      [{ text: "📊 My Progress", callback_data: "progress" }],
-    ],
-  },
-);
-return;
-}
+  if (!enrollment) {
+    await sendMessage(
+      chatId,
+      "No active course connection was found. Open a valid course link first.",
+      {
+        inline_keyboard: [
+          [{ text: "▶ Start Lesson", callback_data: "lesson" }],
+          [{ text: "📊 My Progress", callback_data: "progress" }],
+        ],
+      },
+    );
+    return;
+  }
 
   const completed = (enrollment.completed_lessons || []).length;
   const total = enrollment.courses.total_lessons || 0;
@@ -698,15 +698,15 @@ async function removeInlineKeyboard(chatId, messageId) {
 async function sendSpecificLesson(chatId, lessonOrderNum) {
   // Re-use sendLesson logic but for a specific lesson number
   // Update enrollment current_lesson to the requested number
-  const { enrollment, reason } = await getAuthorizedEnrollment(chatId)
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId);
 
-if (!enrollment) {
-  await sendMessage(
-    chatId,
-    reason || "Please open a valid course link first."
-  )
-  return
-}
+  if (!enrollment) {
+    await sendMessage(
+      chatId,
+      reason || "Please open a valid course link first.",
+    );
+    return;
+  }
 
   const currentLesson = enrollment.current_lesson || 1;
   if (lessonOrderNum > currentLesson) {
@@ -743,16 +743,31 @@ if (!enrollment) {
     .eq("is_published", true)
     .limit(1);
 
-    const lesson = lessons?.[0];
+  const lesson = lessons?.[0];
   if (!lesson) {
     const customAvailabilityMessage = await getAvailabilityMessage(
       supabase,
       enrollment.course_uuid,
       lessonOrderNum,
     );
+    const lockedKeyboard =
+      lessonOrderNum > 1
+        ? {
+            inline_keyboard: [
+              [
+                {
+                  text: "⬅ Previous Lesson",
+                  callback_data: `goto:${lessonOrderNum - 1}`,
+                },
+              ],
+            ],
+          }
+        : undefined;
     await sendMessage(
       chatId,
-      customAvailabilityMessage || `Lesson ${lessonOrderNum} is not available yet.`,
+      customAvailabilityMessage ||
+        `Lesson ${lessonOrderNum} is not available yet.`,
+      lockedKeyboard,
     );
     return;
   }
@@ -778,7 +793,7 @@ if (!enrollment) {
     }
   }
 
-    const noteMessage = await getNoteMessage(supabase, lesson.id);
+  const noteMessage = await getNoteMessage(supabase, lesson.id);
   if (noteMessage) {
     await sendMessage(chatId, noteMessage);
   }
@@ -882,7 +897,7 @@ async function handleUpdate(update) {
         return sendMessage(chatId, "Nothing to cancel\\.");
       }
 
-            if (await hasPendingSubmission(chatId)) {
+      if (await hasPendingSubmission(chatId)) {
         if (
           update.message.document ||
           (update.message.photo && update.message.photo.length)
@@ -912,16 +927,12 @@ async function handleUpdate(update) {
         return handleStart(chatId, token);
       }
 
-      return sendMessage(
-  chatId,
-  "Choose an option below:",
-  {
-    inline_keyboard: [
-      [{ text: "▶ Start Lesson", callback_data: "lesson" }],
-      [{ text: "📊 My Progress", callback_data: "progress" }],
-    ],
-  },
-);
+      return sendMessage(chatId, "Choose an option below:", {
+        inline_keyboard: [
+          [{ text: "▶ Start Lesson", callback_data: "lesson" }],
+          [{ text: "📊 My Progress", callback_data: "progress" }],
+        ],
+      });
     }
 
     if (update.callback_query) {

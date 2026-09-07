@@ -158,9 +158,12 @@ async function sendLesson(chatId) {
     if (lessonErr || !lessons?.length) {
     // Creator-set availability message (per-lesson, from the broadcast
     // widget) takes priority over the generic fallback below.
-    const customAvailabilityMessage = await getAvailabilityMessage(_supabase, course.id, lessonNum)
+        const customAvailabilityMessage = await getAvailabilityMessage(_supabase, course.id, lessonNum)
     if (customAvailabilityMessage) {
-      await _sendMessage(chatId, escMd(customAvailabilityMessage))
+      const lockedKeyboard = lessonNum > 1
+        ? { inline_keyboard: [[{ text: '⬅ Previous Lesson', callback_data: `goto:${lessonNum - 1}` }]] }
+        : undefined
+      await _sendMessage(chatId, escMd(customAvailabilityMessage), lockedKeyboard)
       return
     }
 
