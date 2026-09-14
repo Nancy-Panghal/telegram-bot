@@ -527,6 +527,7 @@ async function markDone(chatId, lessonNumber) {
   }
 
   // Call the web API so both platforms write progress the same way
+  let certificateUrl = null;
   try {
     const res = await fetch(`${ACADEMYKIT_URL}/api/lesson/complete`, {
       method: "POST",
@@ -548,6 +549,11 @@ async function markDone(chatId, lessonNumber) {
         "Your progress could not be saved. Please try again.",
       );
       return;
+    }
+
+    const result = await res.json().catch(() => ({}));
+    if (result.certificateIssued && result.certificateUrl) {
+      certificateUrl = result.certificateUrl;
     }
   } catch (err) {
     console.error("[markDone] fetch error:", err.message);
@@ -580,6 +586,21 @@ async function markDone(chatId, lessonNumber) {
       .eq("lesson_id", lesson.id)
       .maybeSingle();
     assignmentBlocksNext = !existingAssignment;
+  }
+
+  // Course finished — show the certificate instead of the usual lesson menu
+  if (certificateUrl) {
+    await sendMessage(
+      chatId,
+      `🎉 *Course complete!* Lesson ${lessonNumber} marked complete, and your certificate is ready.`,
+      {
+        inline_keyboard: [
+          [{ text: "🎓 View Certificate", url: certificateUrl }],
+          [{ text: "📊 Progress", callback_data: "progress" }],
+        ],
+      },
+    );
+    return;
   }
 
   // Fetch prev/next lesson order numbers to enable navigation
