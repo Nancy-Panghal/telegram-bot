@@ -596,13 +596,13 @@ async function markDone(chatId, lessonNumber) {
       {
         inline_keyboard: [
           [{ text: "🎓 View Certificate", url: certificateUrl }],
+          ...(lessonNumber > 1 ? [[{ text: "⬅ Previous Lesson", callback_data: `goto:${lessonNumber - 1}` }]] : []),
           [{ text: "📊 Progress", callback_data: "progress" }],
         ],
       },
     );
     return;
   }
-
   // Fetch prev/next lesson order numbers to enable navigation
   const { data: adjacentLessons } = await supabase
     .from("lessons")

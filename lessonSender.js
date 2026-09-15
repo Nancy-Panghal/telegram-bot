@@ -169,11 +169,15 @@ async function sendLesson(chatId) {
       await _sendMessage(
         chatId,
         `🎉 You've completed this course\\!\n\nYour certificate is ready\\.`,
-        { inline_keyboard: [[{ text: '🎓 View Certificate', url: existingCert.pdf_url }]] },
+        {
+          inline_keyboard: [
+            [{ text: '🎓 View Certificate', url: existingCert.pdf_url }],
+            ...(lessonNum > 1 ? [[{ text: '⬅ Previous Lesson', callback_data: `goto:${lessonNum - 1}` }]] : []),
+          ],
+        },
       )
       return
     }
-
     // Creator-set availability message (per-lesson, from the broadcast
     // widget) takes priority over the generic fallback below.
         const customAvailabilityMessage = await getAvailabilityMessage(_supabase, course.id, lessonNum)
