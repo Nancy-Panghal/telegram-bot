@@ -23,6 +23,15 @@ const {
 } = require("./assignmentSender");
 
 const {
+  initRatingSender,
+  maybePromptForRating,
+  hasPendingRating,
+  handleRatingStarTap,
+  handleRatingReviewText,
+  cancelPendingRating,
+} = require("./ratingSender");
+
+const {
   sendLesson,
   createWebBootstrapUrl,
   encodeFingerprint,
@@ -80,6 +89,11 @@ initAssignmentSender({
   sendMessage: async (chatId, text, keyboard) =>
     sendMessage(chatId, text, keyboard),
   config: { TELEGRAM_API, BOT_TOKEN },
+});
+initRatingSender({
+  supabase,
+  sendMessage: async (chatId, text, keyboard) =>
+    sendMessage(chatId, text, keyboard),
 });
 
 Object.entries({
@@ -588,7 +602,7 @@ async function markDone(chatId, lessonNumber) {
     assignmentBlocksNext = !existingAssignment;
   }
 
-  // Course finished — show the certificate instead of the usual lesson menu
+    // Course finished — show the certificate instead of the usual lesson menu
   if (certificateUrl) {
     await sendMessage(
       chatId,
@@ -601,6 +615,7 @@ async function markDone(chatId, lessonNumber) {
         ],
       },
     );
+    await maybePromptForRating(chatId, enrollment);
     return;
   }
   // Fetch prev/next lesson order numbers to enable navigation
@@ -910,12 +925,22 @@ async function handleUpdate(update) {
         const enrollment = await getEnrollment(chatId);
         return markDone(chatId, enrollment?.current_lesson || 1);
       }
-      if (text === "/cancel") {
+            if (text === "/cancel") {
+        if (await hasPendingRating(chatId)) {
+          await cancelPendingRating(chatId);
+          return sendMessage(chatId, "Rating cancelled\\.");
+        }
         if (await hasPendingSubmission(chatId)) {
           await cancelPending(chatId);
           return sendMessage(chatId, "Assignment submission cancelled\\.");
         }
         return sendMessage(chatId, "Nothing to cancel\\.");
+      }
+
+      if (await hasPendingRating(chatId)) {
+        if (text && !text.startsWith("/")) {
+          return handleRatingReviewText(chatId, text);
+        }
       }
 
       if (await hasPendingSubmission(chatId)) {
@@ -973,11 +998,13 @@ async function handleUpdate(update) {
         return markDone(chatId, Number(data.replace("done:", "")));
       if (data.startsWith("quiz:"))
         return sendQuiz(chatId, Number(data.replace("quiz:", "")));
-      if (data.startsWith("assign:"))
+            if (data.startsWith("assign:"))
         return beginAssignmentSubmit(
           chatId,
           Number(data.replace("assign:", "")),
         );
+      if (data.startsWith("rate:"))
+        return handleRatingStarTap(chatId, data.replace("rate:", ""));
       // Previous/specific lesson navigation
       if (data.startsWith("goto:")) {
         const targetNum = Number(data.replace("goto:", ""));
