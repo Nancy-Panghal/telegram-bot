@@ -915,6 +915,9 @@ async function handleUpdate(update) {
           const lessonNumber = Number(token.replace("done_", ""));
           return markDone(chatId, lessonNumber);
         }
+        if (token.startsWith("ws_")) {
+          return handleWorkshopStart(chatId, token.slice(3));
+        }
         return handleStart(chatId, token);
       }
       if (text === "/lesson" || text === "/next") {
@@ -969,6 +972,9 @@ async function handleUpdate(update) {
         if (token.startsWith("done_")) {
           const lessonNumber = Number(token.replace("done_", ""));
           return markDone(chatId, lessonNumber);
+        }
+        if (token.startsWith("ws_")) {
+          return handleWorkshopStart(chatId, token.slice(3));
         }
         return handleStart(chatId, token);
       }
@@ -1176,6 +1182,229 @@ async function sendLiveReminders() {
 setInterval(sendLiveReminders, 5 * 60 * 1000);
 // Also run once on startup (after 10s so DB connection is ready)
 setTimeout(sendLiveReminders, 10 * 1000);
+
+// ── Workshop registrations ───────────────────────────────────────
+// Registrants only give a WhatsApp number, so Telegram is opt-in: the
+// workshop page shows a t.me/<bot>?start=ws_<token> button. Tapping it
+// lands here and links that chat to the registration.
+
+function formatWorkshopWhen(iso) {
+  return (
+    new Date(iso).toLocaleString("en-IN", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: "Asia/Kolkata",
+    }) + " IST"
+  );
+}
+
+// Zoom links go on a button, not in the text — URLs with underscores break
+// Telegram's Markdown parsing.
+function workshopJoinKeyboard(zoomLink) {
+  if (!zoomLink || !/^https?:\/\//i.test(zoomLink)) return undefined;
+  return { inline_keyboard: [[{ text: "Join workshop", url: zoomLink }]] };
+}
+
+function buildWorkshopMessage(kind, title, whenLabel) {
+  const t = escMd(title);
+  if (kind === "confirmation") {
+    return `✅ *You're registered!*\n\n*${t}*\n🗓 ${whenLabel}\n\nWe'll remind you before it starts.`;
+  }
+  if (kind === "reminder_24h") {
+    return `⏰ *Tomorrow:* ${t}\n🗓 ${whenLabel}`;
+  }
+  if (kind === "reminder_1h") {
+    return `🔔 *Starting in about 1 hour:* ${t}\n🗓 ${whenLabel}`;
+  }
+  return null;
+}
+
+async function handleWorkshopStart(chatId, linkToken) {
+  const { data: reg, error } = await supabase
+    .from("workshop_registrations")
+    .select(
+      "id, payment_status, telegram_chat_id, workshops!inner(title, date_time, zoom_link)",
+    )
+    .eq("telegram_link_token", linkToken)
+    .maybeSingle();
+
+  const w = Array.isArray(reg?.workshops) ? reg.workshops[0] : reg?.workshops;
+  if (error || !reg || !w) {
+    return sendMessage(
+      chatId,
+      "This workshop link isn't valid anymore. Please register again from the workshop page.",
+    );
+  }
+
+  if (reg.telegram_chat_id && String(reg.telegram_chat_id) !== String(chatId)) {
+    return sendMessage(
+      chatId,
+      "This registration is already connected to another Telegram account.",
+    );
+  }
+
+  if (!reg.telegram_chat_id) {
+    const { error: linkErr } = await supabase
+      .from("workshop_registrations")
+      .update({
+        telegram_chat_id: String(chatId),
+        telegram_linked_at: new Date().toISOString(),
+      })
+      .eq("id", reg.id)
+      .is("telegram_chat_id", null);
+    if (linkErr) {
+      console.error("[workshop-start] link failed:", linkErr.message);
+      return sendMessage(
+        chatId,
+        "Something went wrong linking your registration. Please try the button again.",
+      );
+    }
+  }
+
+  if (reg.payment_status === "confirmed") {
+    return sendMessage(
+      chatId,
+      buildWorkshopMessage("confirmation", w.title, formatWorkshopWhen(w.date_time)),
+      workshopJoinKeyboard(w.zoom_link),
+    );
+  }
+
+  return sendMessage(
+    chatId,
+    `Thanks! You're connected for *${escMd(w.title)}*. We'll message you here as soon as your spot is confirmed.`,
+  );
+}
+
+// Called by course-web (lib/workshop-notify.ts) when a registration is confirmed.
+// Same internal-secret auth as /internal/send-live-recording.
+app.post("/internal/send-workshop-message", async (req, res) => {
+  const auth = req.get("Authorization") || "";
+  if (!INTERNAL_BOT_SECRET || auth !== `Bearer ${INTERNAL_BOT_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { chatId, kind, workshopTitle, dateTimeLabel, zoomLink } =
+    req.body || {};
+  if (!chatId || !kind || !workshopTitle || !dateTimeLabel) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+  const text = buildWorkshopMessage(
+    kind,
+    workshopTitle,
+    `${dateTimeLabel} IST`,
+  );
+  if (!text) return res.status(400).json({ error: "Unknown message kind" });
+
+  try {
+    await sendMessage(chatId, text, workshopJoinKeyboard(zoomLink));
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error(
+      "[internal/send-workshop-message] ❌ FAILED to",
+      chatId,
+      "|",
+      err.message,
+    );
+    return res.status(502).json({ error: "Telegram rejected the send" });
+  }
+});
+
+// 24h + 1h reminders for Telegram-linked, confirmed registrants. Telegram has
+// no template approval, so the bot handles both windows itself. Tracked in
+// separate columns from WhatsApp so the two channels never block each other.
+async function sendWorkshopTelegramReminders() {
+  try {
+    const now = Date.now();
+    const windows = [
+      {
+        kind: "reminder_24h",
+        column: "telegram_reminder_24h_sent_at",
+        start: now + (24 * 60 - 5) * 60 * 1000,
+        end: now + (24 * 60 + 5) * 60 * 1000,
+      },
+      {
+        kind: "reminder_1h",
+        column: "telegram_reminder_1h_sent_at",
+        start: now + 55 * 60 * 1000,
+        end: now + 65 * 60 * 1000,
+      },
+    ];
+
+    for (const win of windows) {
+      const { data: workshops, error } = await supabase
+        .from("workshops")
+        .select("id, title, date_time, zoom_link")
+        .eq("status", "published")
+        .is(win.column, null)
+        .gte("date_time", new Date(win.start).toISOString())
+        .lte("date_time", new Date(win.end).toISOString());
+
+      if (error) {
+        console.error("[workshop-reminders] workshop query failed:", error.message);
+        continue;
+      }
+      if (!workshops || workshops.length === 0) continue;
+
+      for (const workshop of workshops) {
+        const { data: regs, error: regsError } = await supabase
+          .from("workshop_registrations")
+          .select("telegram_chat_id")
+          .eq("workshop_id", workshop.id)
+          .eq("payment_status", "confirmed")
+          .not("telegram_chat_id", "is", null);
+
+        if (regsError) {
+          console.error(
+            "[workshop-reminders] registration query failed for",
+            workshop.id,
+            regsError.message,
+          );
+          continue;
+        }
+
+        const text = buildWorkshopMessage(
+          win.kind,
+          workshop.title,
+          formatWorkshopWhen(workshop.date_time),
+        );
+        const keyboard = workshopJoinKeyboard(workshop.zoom_link);
+        let delivered = 0;
+
+        for (let i = 0; i < (regs || []).length; i++) {
+          try {
+            await sendMessage(regs[i].telegram_chat_id, text, keyboard);
+            delivered++;
+          } catch (err) {
+            // 403 = student blocked the bot — expected, non-fatal
+            console.warn(
+              `[workshop-reminders] failed to send to ${regs[i].telegram_chat_id}:`,
+              err.response?.data?.description || err.message,
+            );
+          }
+          if (i < regs.length - 1) await new Promise((r) => setTimeout(r, 50));
+        }
+
+        console.log(
+          `[workshop-reminders] ${win.kind} for "${workshop.title}": ${delivered}/${(regs || []).length} delivered`,
+        );
+
+        await supabase
+          .from("workshops")
+          .update({ [win.column]: new Date().toISOString() })
+          .eq("id", workshop.id);
+      }
+    }
+  } catch (err) {
+    console.error("[workshop-reminders] error:", err.message);
+  }
+}
+
+setInterval(sendWorkshopTelegramReminders, 5 * 60 * 1000);
+setTimeout(sendWorkshopTelegramReminders, 15 * 1000);
 
 // Called by course-web's /api/cron/live-session-recording-notify (once
 // daily) — sends exactly one message per student per session: the
