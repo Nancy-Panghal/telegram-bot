@@ -45,7 +45,7 @@ app.use(express.json({ limit: "2mb" }));
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "";
 const INTERNAL_BOT_SECRET = process.env.INTERNAL_BOT_SECRET || "";
-const ACADEMYKIT_URL = (process.env.ACADEMYKIT_URL || "").replace(/\/$/, "");
+const KURSO_URL = (process.env.KURSO_URL || "").replace(/\/$/, "");
 const LESSON_LINK_SECRET =
   process.env.LESSON_LINK_SECRET ||
   process.env.TELEGRAM_LINK_SECRET ||
@@ -79,7 +79,7 @@ initLessonSender({
     sendMessage(chatId, text, keyboard),
   config: {
     LESSON_LINK_SECRET,
-    ACADEMYKIT_URL,
+    KURSO_URL,
   },
 });
 
@@ -98,7 +98,7 @@ initRatingSender({
 
 Object.entries({
   TELEGRAM_BOT_TOKEN: BOT_TOKEN,
-  ACADEMYKIT_URL,
+  KURSO_URL,
   SUPABASE_URL: process.env.SUPABASE_URL,
   SUPABASE_KEY: process.env.SUPABASE_KEY,
 }).forEach(([key, value]) =>
@@ -124,7 +124,7 @@ async function firstRow(query) {
 }
 
 function courseUrl(course) {
-  return `${ACADEMYKIT_URL}/course/${slugify(course.host_name || "creator")}/${slugify(course.name || course.slug || "course")}/${course.id}`;
+  return `${KURSO_URL}/course/${slugify(course.host_name || "creator")}/${slugify(course.name || course.slug || "course")}/${course.id}`;
 }
 
 function signResourceUrl(lessonId, type, identity) {
@@ -140,7 +140,7 @@ function signResourceUrl(lessonId, type, identity) {
     exp: String(exp),
     sig,
   });
-  return `${ACADEMYKIT_URL}/resource/${lessonId}?${params.toString()}`;
+  return `${KURSO_URL}/resource/${lessonId}?${params.toString()}`;
 }
 
 async function sendMessage(chatId, text, keyboard) {
@@ -516,7 +516,7 @@ async function handleStart(chatId, token) {
         [
           {
             text: "📚 My Courses Dashboard",
-            url: `${ACADEMYKIT_URL}/my-courses`,
+            url: `${KURSO_URL}/my-courses`,
           },
         ],
       ],
@@ -543,7 +543,7 @@ async function markDone(chatId, lessonNumber) {
   // Call the web API so both platforms write progress the same way
   let certificateUrl = null;
   try {
-    const res = await fetch(`${ACADEMYKIT_URL}/api/lesson/complete`, {
+    const res = await fetch(`${KURSO_URL}/api/lesson/complete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -815,7 +815,7 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
       enrollment.courses?.is_free_course === true || lesson.is_free === true;
     if (!isFree) {
       const course = enrollment.courses;
-      const courseUrl = `${ACADEMYKIT_URL}/about-course/${slugify(course?.host_name || "creator")}/${slugify(course?.name || "course")}/${enrollment.course_uuid}`;
+      const courseUrl = `${KURSO_URL}/about-course/${slugify(course?.host_name || "creator")}/${slugify(course?.name || "course")}/${enrollment.course_uuid}`;
       await sendMessage(
         chatId,
         "🔒 This lesson is locked. Enroll to unlock the full course.",

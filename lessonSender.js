@@ -40,7 +40,7 @@ function signLessonPageUrl(courseId, lessonId, lessonNum, identity) {
     sig,
   })
 
-  return `${_config.ACADEMYKIT_URL}/api/lesson/view?${params.toString()}`
+  return `${_config.KURSO_URL}/api/lesson/view?${params.toString()}`
 }
 
 async function createWebBootstrapUrl({ course, enrollment, channel }) {
@@ -67,7 +67,7 @@ async function createWebBootstrapUrl({ course, enrollment, channel }) {
     throw new Error(`Could not create web access token: ${error.message}`)
   }
 
-  return `${_config.ACADEMYKIT_URL}/api/web-access/bootstrap?t=${encodeURIComponent(rawToken)}`
+  return `${_config.KURSO_URL}/api/web-access/bootstrap?t=${encodeURIComponent(rawToken)}`
 }
 
 // ── Zero-width fingerprint (mirrors lib/signer.ts) ────────────────
@@ -224,7 +224,7 @@ async function sendLesson(chatId) {
   // 4. Free preview check
   const allowed = isLessonAllowed(enrollment, lesson)
   if (!allowed) {
-    const courseUrl = `${_config.ACADEMYKIT_URL}/about-course/${slugify(course.host_name || 'creator')}/${slugify(course.name || 'course')}/${course.id}`
+    const courseUrl = `${_config.KURSO_URL}/about-course/${slugify(course.host_name || 'creator')}/${slugify(course.name || 'course')}/${course.id}`
     await _sendMessage(
       chatId,
       `🔒 *Free preview complete\\.*\n\nUnlock the full course to continue learning\\.`,
