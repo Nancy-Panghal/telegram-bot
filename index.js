@@ -258,7 +258,7 @@ async function handleStart(chatId, token) {
   if (!token) {
     await sendMessage(
       chatId,
-      "Welcome to AcademyKit.\n\nOpen a course page and tap *Start on Telegram* to connect your course.",
+      "Welcome to Kurso.\n\nOpen a course page and tap *Start on Telegram* to connect your course.",
     );
     return;
   }
