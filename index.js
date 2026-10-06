@@ -38,6 +38,7 @@ const {
   escMd,
 } = require("./lessonSender");
 const { getAvailabilityMessage, getNoteMessage } = require("./lessonMessages");
+const { getLessonLock, formatUnlockAt } = require("./moduleLock");
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -196,18 +197,19 @@ async function answerCallback(callbackQueryId) {
     .catch(() => {});
 }
 
-async function getEnrollment(chatId) {
-  return firstRow(
-    supabase
-      .from("enrollments")
-      .select("*, courses:course_uuid(*)")
-      .eq("telegram_chat_id", String(chatId))
-      .order("enrolled_at", { ascending: false }),
-  );
+async function getEnrollment(chatId, enrollmentId) {
+  let query = supabase
+    .from("enrollments")
+    .select("*, courses:course_uuid(*)")
+    .eq("telegram_chat_id", String(chatId));
+  // Optional: pin to one specific enrollment (used by the "Get new link" button).
+  // Still filtered by this chat above, so a forged id for someone else's enrollment matches nothing.
+  if (enrollmentId) query = query.eq("id", enrollmentId);
+  return firstRow(query.order("enrolled_at", { ascending: false }));
 }
 
-async function getAuthorizedEnrollment(chatId) {
-  const enrollment = await getEnrollment(chatId);
+async function getAuthorizedEnrollment(chatId, enrollmentId) {
+  const enrollment = await getEnrollment(chatId, enrollmentId);
 
   if (!enrollment || !enrollment.courses) {
     return { enrollment: null, reason: "No active enrollment found." };
@@ -731,10 +733,10 @@ async function removeInlineKeyboard(chatId, messageId) {
   }
 }
 
-async function sendSpecificLesson(chatId, lessonOrderNum) {
+async function sendSpecificLesson(chatId, lessonOrderNum, enrollmentId) {
   // Re-use sendLesson logic but for a specific lesson number
   // Update enrollment current_lesson to the requested number
-  const { enrollment, reason } = await getAuthorizedEnrollment(chatId);
+  const { enrollment, reason } = await getAuthorizedEnrollment(chatId, enrollmentId);
 
   if (!enrollment) {
     await sendMessage(
@@ -773,7 +775,7 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
   // Don't update current_lesson backwards — keep it as the highest reached
   const { data: lessons } = await supabase
     .from("lessons")
-    .select("id, title, order_num, quiz_questions, is_free")
+    .select("id, title, order_num, quiz_questions, is_free, module_id")
     .eq("course_id", enrollment.course_uuid)
     .eq("order_num", lessonOrderNum)
     .eq("is_published", true)
@@ -829,6 +831,29 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
     }
   }
 
+    // Module release schedule (drip). Free-preview lessons / free courses are never held back.
+  if (!lesson.is_free && enrollment.courses?.is_free_course !== true) {
+    const lock = await getLessonLock(supabase, {
+      course: enrollment.courses,
+      lesson,
+      enrollment,
+    });
+    if (lock.locked) {
+      await sendMessage(
+        chatId,
+        `🔒 *${escMd(lock.moduleName || "This module")}* isn't unlocked yet.\n\nIt unlocks on *${escMd(formatUnlockAt(lock.unlockAt))}*.`,
+        lessonOrderNum > 1
+          ? {
+              inline_keyboard: [
+                [{ text: "⬅ Previous Lesson", callback_data: `goto:${lessonOrderNum - 1}` }],
+              ],
+            }
+          : undefined,
+      );
+      return;
+    }
+  }
+
   const noteMessage = await getNoteMessage(supabase, lesson.id);
   if (noteMessage) {
     await sendMessage(chatId, noteMessage);
@@ -838,6 +863,7 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
     course: enrollment.courses,
     enrollment,
     channel: "telegram",
+    lessonNum: lesson.order_num,
   });
   const fp = encodeFingerprint(String(chatId));
 
@@ -849,6 +875,7 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
 
   const keyboard = [
     [{ text: "▶ Open Lesson", url: lessonUrl }],
+    [{ text: "🔄 Get new link", callback_data: `relink:${enrollment.id}:${lesson.order_num}` }],
     [
       { text: "✅ Mark Done", callback_data: `done:${lesson.order_num}` },
       { text: "📊 Progress", callback_data: "progress" },
@@ -885,7 +912,7 @@ async function sendSpecificLesson(chatId, lessonOrderNum) {
 
   await sendMessage(
     chatId,
-    `${headerText}\n\nTap *Open Lesson* below. Access expires in 2 hours.\n\n🔒 _This link is personal. Do not share it._\n${fp}`,
+    `${headerText}\n\nTap *Open Lesson* below. The link works for 2 minutes. If it expires, tap Get new link.\n\n🔒 _This link is personal. Do not share it._\n${fp}`,
     { inline_keyboard: keyboard },
   );
 
@@ -1015,6 +1042,21 @@ async function handleUpdate(update) {
       if (data.startsWith("goto:")) {
         const targetNum = Number(data.replace("goto:", ""));
         return sendSpecificLesson(chatId, targetNum);
+      }
+      // "Get new link": always mints a fresh link, no expiry detection needed.
+      // Format: relink:<enrollmentId uuid>:<lesson order number>  (kept under Telegram's 64-byte callback limit)
+      if (data.startsWith("relink:")) {
+        const [, enrollmentId, orderStr] = data.split(":");
+        const orderNum = Number(orderStr);
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          enrollmentId || "",
+        );
+        if (!isUuid || !Number.isInteger(orderNum) || orderNum < 1) {
+          return sendMessage(chatId, "That button is no longer valid. Tap Start Lesson to continue.", {
+            inline_keyboard: [[{ text: "▶ Start Lesson", callback_data: "lesson" }]],
+          });
+        }
+        return sendSpecificLesson(chatId, orderNum, enrollmentId);
       }
     }
   } catch (err) {
@@ -1310,6 +1352,90 @@ app.post("/internal/send-workshop-message", async (req, res) => {
       err.message,
     );
     return res.status(502).json({ error: "Telegram rejected the send" });
+  }
+});
+
+// Called by course-web's daily /api/cron/module-unlocks job. The cron only decides
+// WHO is due; this endpoint re-checks everything itself (paid, module belongs to the
+// course, still unlocked for this student) and returns 409 if the message must not go out.
+// The Start button is a "relink" callback, not a URL: bootstrap links last 2 minutes,
+// so a URL minted now would be dead long before the student opens this message.
+app.post("/internal/send-module-unlock", async (req, res) => {
+  const auth = req.get("Authorization") || "";
+  if (!INTERNAL_BOT_SECRET || auth !== `Bearer ${INTERNAL_BOT_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { enrollmentId, moduleId } = req.body || {};
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRe.test(enrollmentId || "") || !uuidRe.test(moduleId || "")) {
+    return res.status(400).json({ error: "Missing or invalid ids" });
+  }
+
+  try {
+    const enrollment = await firstRow(
+      supabase
+        .from("enrollments")
+        .select("*, courses:course_uuid(*)")
+        .eq("id", enrollmentId),
+    );
+    if (!enrollment || !enrollment.telegram_chat_id || !enrollment.courses) {
+      return res.status(409).json({ error: "Enrollment not reachable on Telegram" });
+    }
+    if (enrollment.payment_status !== "paid") {
+      return res.status(409).json({ error: "Enrollment is not paid" });
+    }
+
+    const mod = await firstRow(
+      supabase
+        .from("course_modules")
+        .select("id, name")
+        .eq("id", moduleId)
+        .eq("course_id", enrollment.course_uuid),
+    );
+    if (!mod) return res.status(409).json({ error: "Module not in this course" });
+
+    const firstLesson = await firstRow(
+      supabase
+        .from("lessons")
+        .select("id, order_num, module_id, is_free")
+        .eq("module_id", moduleId)
+        .eq("course_id", enrollment.course_uuid)
+        .eq("is_published", true)
+        .order("order_num", { ascending: true }),
+    );
+    if (!firstLesson) return res.status(409).json({ error: "Module has no published lessons" });
+
+    // Never announce a module that is still locked for this student.
+    const lock = await getLessonLock(supabase, {
+      course: enrollment.courses,
+      lesson: firstLesson,
+      enrollment,
+    });
+    if (lock.locked) return res.status(409).json({ error: "Module is still locked" });
+
+    await sendMessage(
+      enrollment.telegram_chat_id,
+      `🔓 *New module unlocked: ${escMd(mod.name || "Next module")}*\n\nPart of ${escMd(enrollment.courses.name || "your course")} — ready for you now.`,
+      {
+        inline_keyboard: [
+          [
+            {
+              text: "▶ Start",
+              callback_data: `relink:${enrollment.id}:${firstLesson.order_num}`,
+            },
+            { text: "📊 Progress", callback_data: "progress" },
+          ],
+        ],
+      },
+    );
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error(
+      "[internal/send-module-unlock] ❌ FAILED |",
+      err.response?.data?.description || err.message,
+    );
+    return res.status(502).json({ error: "Send failed" });
   }
 });
 

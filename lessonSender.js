@@ -12,6 +12,7 @@ const axios  = require('axios')
 const { checkRateLimit, logLessonAccess } = require('./watermark')
 const { getRequiredAssignmentBlock } = require('./assignmentSender')
 const { getAvailabilityMessage, getNoteMessage } = require('./lessonMessages')
+const { getLessonLock, formatUnlockAt } = require('./moduleLock')
 
 let _supabase, _sendMessage, _config
 
@@ -43,7 +44,7 @@ function signLessonPageUrl(courseId, lessonId, lessonNum, identity) {
   return `${_config.KURSO_URL}/api/lesson/view?${params.toString()}`
 }
 
-async function createWebBootstrapUrl({ course, enrollment, channel }) {
+async function createWebBootstrapUrl({ course, enrollment, channel, lessonNum }) {
   const rawToken = crypto.randomBytes(32).toString('hex')
   const tokenHash = crypto
     .createHash('sha256')
@@ -67,7 +68,10 @@ async function createWebBootstrapUrl({ course, enrollment, channel }) {
     throw new Error(`Could not create web access token: ${error.message}`)
   }
 
-  return `${_config.KURSO_URL}/api/web-access/bootstrap?t=${encodeURIComponent(rawToken)}`
+  // Optional: open this exact lesson (order number) instead of the course's resume point.
+  // Only a navigation hint — the web app still enforces enrollment and module locks per lesson.
+  const lessonParam = Number.isInteger(lessonNum) && lessonNum >= 1 ? `&lesson=${lessonNum}` : ''
+  return `${_config.KURSO_URL}/api/web-access/bootstrap?t=${encodeURIComponent(rawToken)}${lessonParam}`
 }
 
 // ── Zero-width fingerprint (mirrors lib/signer.ts) ────────────────
@@ -233,6 +237,22 @@ async function sendLesson(chatId) {
     return
   }
 
+      // 4.4 Module release schedule (drip). Free-preview lessons / free courses are never held back.
+  if (!lesson.is_free && course.is_free_course !== true) {
+    const lock = await getLessonLock(_supabase, { course, lesson, enrollment })
+    if (lock.locked) {
+      const lockedKeyboard = lessonNum > 1
+        ? { inline_keyboard: [[{ text: '⬅ Previous Lesson', callback_data: `goto:${lessonNum - 1}` }]] }
+        : undefined
+      await _sendMessage(
+        chatId,
+        `🔒 *${escMd(lock.moduleName || 'This module')}* isn't unlocked yet\\.\n\nIt unlocks on *${escMd(formatUnlockAt(lock.unlockAt))}*\\.`,
+        lockedKeyboard,
+      )
+      return
+    }
+  }
+
     // 4.5 Creator "note" for an already-available lesson — sent first, as its own message.
   const noteMessage = await getNoteMessage(_supabase, lesson.id)
   if (noteMessage) {
@@ -244,6 +264,7 @@ async function sendLesson(chatId) {
   course,
   enrollment,
   channel: 'telegram',
+  lessonNum: lesson.order_num,
 })
 
   // 6. Build watermarked message
@@ -261,6 +282,7 @@ async function sendLesson(chatId) {
 
   const keyboard = [
     [{ text: '▶ Open Lesson', url: lessonUrl }],
+    [{ text: '🔄 Get new link', callback_data: `relink:${enrollment.id}:${lesson.order_num}` }],
     [
       { text: '✅ Mark Done', callback_data: `done:${lesson.order_num}` },
       { text: '📊 Progress',  callback_data: 'progress' },
