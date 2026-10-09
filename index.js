@@ -1043,7 +1043,28 @@ async function handleUpdate(update) {
         const targetNum = Number(data.replace("goto:", ""));
         return sendSpecificLesson(chatId, targetNum);
       }
-      // "Get new link": always mints a fresh link, no expiry detection needed.
+      // One-tap opt-out from the live-class reminder message.
+      if (data === "mute_live") {
+        const rows = await supabase
+          .from("enrollments")
+          .select("student_id")
+          .eq("telegram_chat_id", String(chatId));
+        const ids = [
+          ...new Set((rows.data || []).map((r) => r.student_id).filter(Boolean)),
+        ];
+        if (ids.length) {
+          await supabase
+            .from("students")
+            .update({ reminder_channel: "none" })
+            .in("id", ids);
+        }
+        return sendMessage(
+          chatId,
+          ids.length
+            ? "🔕 Live-class reminders are off. Your lessons are still here whenever you want them."
+            : "Couldn't find your account to update. Please try again from your course chat.",
+        );
+      }
       // Format: relink:<enrollmentId uuid>:<lesson order number>  (kept under Telegram's 64-byte callback limit)
       if (data.startsWith("relink:")) {
         const [, enrollmentId, orderStr] = data.split(":");
@@ -1125,7 +1146,7 @@ async function sendLiveReminders() {
       // sequence, and are paid, get considered at all.
       const { data: enrollments } = await supabase
         .from("enrollments")
-        .select("telegram_chat_id, phone")
+        .select("telegram_chat_id, phone, student_id")
         .eq("course_uuid", lesson.course_id)
         .eq("current_lesson", lesson.order_num)
         .eq("payment_status", "paid")
@@ -1139,20 +1160,26 @@ async function sendLiveReminders() {
         continue;
       }
 
-      // Of those, only students who opted into Telegram reminders.
-      const phones = enrollments.map((e) => e.phone).filter(Boolean);
-      const { data: optedInStudents } = phones.length
+      // Telegram-linked students get live-class reminders by default. The only way to opt in
+      // used to be a button on the old lesson page, which new students never see (links now
+      // open the course page), so nobody was being reminded. A student stays out only if they
+      // chose WhatsApp or "none"; every reminder carries a one-tap Mute button.
+      const studentIds = [
+        ...new Set(enrollments.map((e) => e.student_id).filter(Boolean)),
+      ];
+      const { data: studentRows } = studentIds.length
         ? await supabase
             .from("students")
-            .select("phone")
-            .in("phone", phones)
-            .eq("reminder_channel", "telegram")
+            .select("id, reminder_channel")
+            .in("id", studentIds)
         : { data: [] };
-
-      const optedInPhones = new Set(
-        (optedInStudents || []).map((s) => s.phone),
+      const channelById = new Map(
+        (studentRows || []).map((s) => [s.id, s.reminder_channel]),
       );
-      const recipients = enrollments.filter((e) => optedInPhones.has(e.phone));
+      const recipients = enrollments.filter((e) => {
+        const channel = e.student_id ? channelById.get(e.student_id) : null;
+        return !channel || channel === "telegram";
+      });
 
       if (recipients.length === 0) {
         await supabase
@@ -1190,6 +1217,11 @@ async function sendLiveReminders() {
               parse_mode: "Markdown",
               protect_content: true,
               disable_web_page_preview: false,
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "🔕 Mute live-class reminders", callback_data: "mute_live" }],
+                ],
+              },
             },
             { timeout: 10000 },
           );
@@ -1355,7 +1387,84 @@ app.post("/internal/send-workshop-message", async (req, res) => {
   }
 });
 
-// Called by course-web's daily /api/cron/module-unlocks job. The cron only decides
+// Called by course-web's daily /api/cron/inactivity-nudge job. The cron decides WHO is
+// due and which lesson; this endpoint re-checks everything itself (paid, course published,
+// lesson exists and is published, still unlocked for this student) and answers 409 when the
+// nudge must not go out. Like the module-unlock message, Continue is a "relink" callback so
+// the link is minted when the student taps it, not hours earlier when this message is sent.
+app.post("/internal/send-inactivity-nudge", async (req, res) => {
+  const auth = req.get("Authorization") || "";
+  if (!INTERNAL_BOT_SECRET || auth !== `Bearer ${INTERNAL_BOT_SECRET}`) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { enrollmentId, lessonNum } = req.body || {};
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRe.test(enrollmentId || "") || !Number.isInteger(lessonNum) || lessonNum < 1 || lessonNum > 9999) {
+    return res.status(400).json({ error: "Missing or invalid enrollmentId / lessonNum" });
+  }
+
+  try {
+    const enrollment = await firstRow(
+      supabase
+        .from("enrollments")
+        .select("*, courses:course_uuid(*)")
+        .eq("id", enrollmentId),
+    );
+    if (!enrollment || !enrollment.telegram_chat_id || !enrollment.courses) {
+      return res.status(409).json({ error: "Enrollment not reachable on Telegram" });
+    }
+    if (enrollment.payment_status !== "paid") {
+      return res.status(409).json({ error: "Enrollment is not paid" });
+    }
+    if (enrollment.courses.is_published === false) {
+      return res.status(409).json({ error: "Course is not published" });
+    }
+
+    const lesson = await firstRow(
+      supabase
+        .from("lessons")
+        .select("id, title, order_num, module_id, is_free")
+        .eq("course_id", enrollment.course_uuid)
+        .eq("order_num", lessonNum)
+        .eq("is_published", true),
+    );
+    if (!lesson) return res.status(409).json({ error: "Lesson not available" });
+
+    // Never nudge toward a lesson that is still locked for this student.
+    if (!lesson.is_free && enrollment.courses.is_free_course !== true) {
+      const lock = await getLessonLock(supabase, {
+        course: enrollment.courses,
+        lesson,
+        enrollment,
+      });
+      if (lock.locked) return res.status(409).json({ error: "Lesson is still locked" });
+    }
+
+    await sendMessage(
+      enrollment.telegram_chat_id,
+      `👋 Whenever you're ready — *${escMd(enrollment.courses.name || "your course")}* is still here.\n\nYou were on *${escMd(lesson.title || "your last lesson")}* last time.`,
+      {
+        inline_keyboard: [
+          [
+            {
+              text: "▶ Continue",
+              callback_data: `relink:${enrollment.id}:${lesson.order_num}`,
+            },
+            { text: "📚 My Courses", url: `${KURSO_URL}/my-courses` },
+          ],
+        ],
+      },
+    );
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error(
+      "[internal/send-inactivity-nudge] ❌ FAILED |",
+      err.response?.data?.description || err.message,
+    );
+    return res.status(502).json({ error: "Send failed" });
+  }
+});
 // WHO is due; this endpoint re-checks everything itself (paid, module belongs to the
 // course, still unlocked for this student) and returns 409 if the message must not go out.
 // The Start button is a "relink" callback, not a URL: bootstrap links last 2 minutes,
